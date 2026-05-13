@@ -21,6 +21,7 @@ The application logic avoids dynamic allocation where possible, aiming to operat
 ## Source Code Comments
 
 /*
+
  * PROJECT ROADMAP
  * COMPLIANCE STATUS:
  * [MET] 2026-05-13: Full historical edlin command set implemented securely.
@@ -32,4 +33,5 @@ The application logic avoids dynamic allocation where possible, aiming to operat
  * 3. Integrate automated memory profiling checks directly into the build and deployment script.
  * VERSION: 1.3.1
  * LICENSE: MIT License
- */
+
+*/

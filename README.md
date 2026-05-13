@@ -9,6 +9,8 @@ The application logic avoids dynamic allocation where possible, aiming to operat
 ## Compilation Instructions
 **Linux (POSIX) via GCC:**
 `cc -ansi -pedantic -Wall -o edlin edlin.c`
+**Linux (POSIX) via Bruce's C Compiler (BCC):**
+ `bcc -ansi -o edlin edlin.c`
 
 
 ## Source Code Comments

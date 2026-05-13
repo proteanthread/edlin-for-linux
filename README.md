@@ -32,12 +32,4 @@ The application logic avoids dynamic allocation where possible, aiming to operat
  * 3. Integrate automated memory profiling checks directly into the build and deployment script.
  * VERSION: 1.3.1
  * LICENSE: MIT License
- *
- * COMPILATION INSTRUCTIONS:
- * 
- * Linux (POSIX) via GCC:
- * Command: gcc -ansi -pedantic -Wall -o edlin edlin.c
- *
- * Linux (POSIX) via Bruce's C Compiler (BCC):
- * Command: bcc -ansi -o edlin edlin.c
  */

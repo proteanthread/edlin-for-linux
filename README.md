@@ -1,19 +1,25 @@
 # edlin for Linux
+
 the original Microsoft DOS text editor, edlin, has been ported over to Linux. This should work under all linux distros.
 
 
 ## Architecture and Design
+
 The application logic avoids dynamic allocation where possible, aiming to operate safely within a 512 KB memory limit for reliable execution on constrained and legacy systems.
 
 
+
 ## Compilation Instructions
+
 **Linux (POSIX) via GCC:**
 `cc -ansi -pedantic -Wall -o edlin edlin.c`
+
 **Linux (POSIX) via Bruce's C Compiler (BCC):**
  `bcc -ansi -o edlin edlin.c`
 
 
 ## Source Code Comments
+
 /*
  * PROJECT ROADMAP
  * COMPLIANCE STATUS:

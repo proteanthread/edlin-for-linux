@@ -1,6 +1,6 @@
 # edlin for Linux
 
-the original Microsoft DOS text editor, edlin, has been ported over to Linux. This should work under all linux distros.
+the original Microsoft DOS text editor, edlin, has been ported over to Linux. This should work under all linux distros. Includes an online help (whereas the original on MSDOS did not).
 
 
 ## Architecture and Design

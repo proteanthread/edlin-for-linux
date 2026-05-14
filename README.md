@@ -1,4 +1,4 @@
-# edlin for Linux
+# edlin for Linux v1.3.1
 
 the original Microsoft DOS text editor, edlin, has been ported over to Linux. This should work under all linux distros. Includes an online help (whereas the original on MSDOS did not).
 

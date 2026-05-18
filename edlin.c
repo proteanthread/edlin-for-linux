@@ -1,4 +1,5 @@
 /*
+ *
  * PROJECT ROADMAP
  * COMPLIANCE STATUS:
  * [MET] 2026-05-13: Full historical edlin command set implemented securely.
@@ -11,22 +12,6 @@
  * VERSION: 1.3.1
  * LICENSE: Modified MIT License
  *
- * COMPILATION INSTRUCTIONS:
- * 
- * Linux (POSIX) via GCC:
- * Command: gcc -ansi -pedantic -Wall -o edlin edlin.c
- *
- * Linux (POSIX) via Bruce's C Compiler (BCC):
- * Command: bcc -ansi -o edlin edlin.c
- *
- * FreeDOS via Bruce's C Compiler (BCC):
- * Command: bcc -ansi -o edlin.exe edlin.c
- *
- * FreeDOS via Open Watcom:
- * Command: wcl -za edlin.c
- *
- * FreeDOS via Turbo C / Turbo C++:
- * Command: tcc -A edlin.c
  */
 
 #include <stdio.h>

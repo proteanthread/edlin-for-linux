@@ -41,7 +41,9 @@
 
 #ifdef _WIN32
 #  include <io.h>
+#  define NOMINMAX      /* Prevents Windows from defining min() and max() macros */
 #  include <windows.h>
+#  undef PASCAL         /* Prevents collision with the Lang::PASCAL enum member */
 #else
 #  include <unistd.h>
 #endif

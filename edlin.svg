@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="1400" height="1800" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .box {
+      fill: #f8f8f8;
+      stroke: #000000;
+      stroke-width: 2;
+    }
+    .diamond {
+      fill: #fff8dc;
+      stroke: #000000;
+      stroke-width: 2;
+    }
+    .line {
+      stroke: #000000;
+      stroke-width: 2;
+      fill: none;
+      marker-end: url(#arrow);
+    }
+    .text {
+      font-family: monospace;
+      font-size: 18px;
+      text-anchor: middle;
+    }
+    .smalltext {
+      font-family: monospace;
+      font-size: 15px;
+    }
+    .title {
+      font-family: monospace;
+      font-size: 24px;
+      font-weight: bold;
+      text-anchor: middle;
+    }
+  </style>
+
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10"
+            refX="10" refY="3" orient="auto">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <text x="700" y="40" class="title">EDLIN Main Program Flowchart</text>
+
+  <!-- Start -->
+  <rect x="550" y="70" width="300" height="60" rx="20" ry="20" class="box"/>
+  <text x="700" y="108" class="text">START</text>
+
+  <!-- argc decision -->
+  <line x1="700" y1="130" x2="700" y2="180" class="line"/>
+  <polygon points="700,180 850,250 700,320 550,250" class="diamond"/>
+  <text x="700" y="245" class="text">argc &gt; 1 ?</text>
+
+  <!-- Yes branch -->
+  <line x1="850" y1="250" x2="1050" y2="250" class="line"/>
+  <text x="930" y="235" class="smalltext">Yes</text>
+
+  <rect x="1050" y="210" width="250" height="80" class="box"/>
+  <text x="1175" y="240" class="text">load_file()</text>
+  <text x="1175" y="265" class="text">Print help hint</text>
+
+  <!-- No branch -->
+  <line x1="550" y1="250" x2="300" y2="250" class="line"/>
+  <text x="420" y="235" class="smalltext">No</text>
+
+  <rect x="50" y="210" width="250" height="100" class="box"/>
+  <text x="175" y="245" class="text">Print usage error</text>
+  <text x="175" y="275" class="text">return 1</text>
+
+  <!-- Merge -->
+  <line x1="1175" y1="290" x2="1175" y2="380" class="line"/>
+  <line x1="1175" y1="380" x2="700" y2="380" class="line"/>
+
+  <!-- Main Loop -->
+  <rect x="500" y="400" width="400" height="80" class="box"/>
+  <text x="700" y="435" class="text">while(1)</text>
+  <text x="700" y="460" class="text">Main Command Loop</text>
+
+  <!-- Input -->
+  <line x1="700" y1="480" x2="700" y2="540" class="line"/>
+
+  <rect x="450" y="540" width="500" height="100" class="box"/>
+  <text x="700" y="575" class="text">Print "*"</text>
+  <text x="700" y="605" class="text">Read command using fgets()</text>
+
+  <!-- fgets decision -->
+  <line x1="700" y1="640" x2="700" y2="700" class="line"/>
+
+  <polygon points="700,700 850,770 700,840 550,770" class="diamond"/>
+  <text x="700" y="765" class="text">Input valid?</text>
+
+  <!-- No exit -->
+  <line x1="550" y1="770" x2="300" y2="770" class="line"/>
+  <text x="420" y="755" class="smalltext">No</text>
+
+  <rect x="50" y="730" width="250" height="80" class="box"/>
+  <text x="175" y="770" class="text">Exit Loop</text>
+
+  <!-- Yes -->
+  <line x1="700" y1="840" x2="700" y2="900" class="line"/>
+  <text x="720" y="875" class="smalltext">Yes</text>
+
+  <!-- Dispatch -->
+  <rect x="300" y="900" width="800" height="560" class="box"/>
+  <text x="700" y="935" class="text">Command Dispatch</text>
+
+  <text x="340" y="980" class="smalltext">Numeric  → edit_line()</text>
+  <text x="340" y="1015" class="smalltext">a/A      → append_lines()</text>
+  <text x="340" y="1050" class="smalltext">c/C      → copy_lines()</text>
+  <text x="340" y="1085" class="smalltext">d/D      → delete_line()</text>
+  <text x="340" y="1120" class="smalltext">e/E      → save_file(); break</text>
+  <text x="340" y="1155" class="smalltext">h/H/?    → display_help()</text>
+  <text x="340" y="1190" class="smalltext">i/I      → insert_line()</text>
+  <text x="340" y="1225" class="smalltext">l/L      → list_lines()</text>
+
+  <text x="760" y="980" class="smalltext">m/M → move_lines()</text>
+  <text x="760" y="1015" class="smalltext">p/P → page_display()</text>
+  <text x="760" y="1050" class="smalltext">q/Q → break</text>
+  <text x="760" y="1085" class="smalltext">r/R → replace_text()</text>
+  <text x="760" y="1120" class="smalltext">s/S → search_text()</text>
+  <text x="760" y="1155" class="smalltext">t/T → transfer_file()</text>
+  <text x="760" y="1190" class="smalltext">w/W → write_lines()</text>
+  <text x="760" y="1225" class="smalltext">other → Entry error</text>
+
+  <!-- Loop back -->
+  <line x1="700" y1="1460" x2="700" y2="1540" class="line"/>
+  <line x1="700" y1="1540" x2="1100" y2="1540" class="line"/>
+  <line x1="1100" y1="1540" x2="1100" y2="440" class="line"/>
+  <line x1="1100" y1="440" x2="900" y2="440" class="line"/>
+
+  <!-- End -->
+  <line x1="175" y1="810" x2="175" y2="1650" class="line"/>
+  <rect x="50" y="1650" width="250" height="80" rx="20" ry="20" class="box"/>
+  <text x="175" y="1695" class="text">END / return 0</text>
+
+</svg>

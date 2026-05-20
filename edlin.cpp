@@ -26,7 +26,7 @@
  *   which is identical on every supported platform.
  */
 
-/* ── Standard Library ─────────────────────────────────────────────────────── */
+/* Standard Library */
 
 #include <algorithm>
 #include <array>
@@ -37,7 +37,7 @@
 #include <iostream>
 #include <string_view>
 
-/* ── Platform Detection ───────────────────────────────────────────────────── */
+/* Platform Detection */
 
 #ifdef _WIN32
 #  include <io.h>
@@ -48,7 +48,7 @@
 #  include <unistd.h>
 #endif
 
-/* ── Compile-Time Constants ───────────────────────────────────────────────── */
+/* Compile-Time Constants */
 
 #define MAX_LINES   1024   /* Maximum lines held in the memory buffer. */
 #define LINE_LENGTH  128   /* Maximum bytes per line (127 chars + NUL). */
@@ -56,9 +56,10 @@
 
 static constexpr const char *EDLIN_VERSION = "2.0.0";
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* 
  *  SECTION 1 — Color / Terminal Configuration
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * 
+ */
 
 namespace cfg {
 
@@ -135,9 +136,10 @@ constexpr std::array<std::string_view, 133> KEYWORDS = {
 
 } /* namespace cfg */
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* 
  *  SECTION 2 — Syntax Highlighter
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * 
+ */
 
 class SyntaxHighlighter {
 public:
@@ -469,9 +471,10 @@ private:
 
 }; /* class SyntaxHighlighter */
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* 
  *  SECTION 3 — EdlinEditor
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * 
+ */
 
 class EdlinEditor {
 
@@ -483,7 +486,7 @@ class EdlinEditor {
     std::array<char, LINE_LENGTH> current_filename{};
     cfg::Lang current_lang = cfg::Lang::UNKNOWN;
 
-    /* ── Private helpers ──────────────────────────────────────────────────── */
+    /* Private helpers */
 
     /* Prompt, read a line, return its integer value (0 on EOF/error). */
     int get_int_prompt(const char *prompt)
@@ -526,7 +529,7 @@ class EdlinEditor {
         SyntaxHighlighter::print_highlighted(text_buffer[i].data(), current_lang);
     }
 
-    /* ── Range-validation helper ──────────────────────────────────────────── */
+    /* Range-validation helper */
 
     /*
      * Returns true and prints an error if [start, end] is not a valid
@@ -543,7 +546,7 @@ class EdlinEditor {
 
 public:
 
-    /* ── Public interface — command implementations ───────────────────────── */
+    /* Public interface command implementations */
 
     /* 'h' / '?' — Show the full built-in help, matching the edlin.c 1.3.1
      *             command table exactly; also reports compile-time limits. */
@@ -928,7 +931,7 @@ public:
         std::cout << count << " lines moved.\n";
     }
 
-    /* ── Main command loop ────────────────────────────────────────────────── */
+    /* Main command loop */
 
     void run()
     {
@@ -981,9 +984,10 @@ public:
 
 }; /* class EdlinEditor */
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* 
  *  SECTION 4 — CLI Flag Handlers
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * 
+ */
 
 static void print_usage()
 {
@@ -1028,9 +1032,10 @@ static void print_license()
         " SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n";
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* 
  *  SECTION 5 — Entry Point
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * 
+ */
 
 int main(int argc, char *argv[])
 {

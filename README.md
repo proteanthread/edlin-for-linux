@@ -1,3 +1,6 @@
+[![GitGem](https://gitgem.org/api/badge/github/proteanthread/edlin-for-linux.svg)](https://gitgem.org/github/proteanthread/edlin-for-linux)
+
+
 Updated 'edlin.c' to 'edlin.cpp' - Version 2.0 (added syntax highlighting)
 
 # edlin for Linux v1.3.1

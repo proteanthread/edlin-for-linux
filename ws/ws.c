@@ -1,8 +1,10 @@
 /*
- * VERSION: 1.2.0
+ * VERSION: 1.3.2
  * LICENSE: MIT License
- * Description: ws.c - Portable WordStar-like Full-Screen Editor (C89 compliant)
- * Fixed: IDE Tab-stop mapping (4 spaces) and Virtual Column Memory for vertical navigation.
+ * COPYLEFT: BASIC++ Community
+ *
+ * ws.c - Portable WordStar-like Full-Screen Editor
+ *
  */
 
 #include <stdio.h>

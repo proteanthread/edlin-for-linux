@@ -1,6 +1,10 @@
 /*
+ * VERSION: 1.3.2
+ * LICENSE: MIT License
+ * COPYLEFT: BASIC++ Community
+ *
  * vi.c - Bare minimum vi-style visual text editor
- * Strict C89, compiles cleanly on Linux, Windows 11, and FreeDOS.
+ *
  */
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)

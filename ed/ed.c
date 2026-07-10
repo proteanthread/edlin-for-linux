@@ -1,10 +1,11 @@
 /*
- * ed.c - Strict C89 MS-DOS 5.0 / QBASIC EDIT.COM clone
+ * VERSION: 1.3.2
+ * LICENSE: MIT License
+ * COPYLEFT: BASIC++ Community
+ *
+ * ed.c - a MS-DOS 5.0 / QBASIC EDIT.COM clone
  * Keyboard-driven terminal text editor. Absolutely no mouse required.
- * 
- * Compilation:
- *   Windows:   gcc ed.c -o ed.exe -O2
- *   Linux/Mac: gcc ed.c -o ed -O2 -std=c89 -pedantic -Wall
+ *
  */
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)

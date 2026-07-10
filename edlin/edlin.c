@@ -2,7 +2,10 @@
  * VERSION: 1.3.2
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
+ *
+ * edlin.c - based on the original MSDOS line editor
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

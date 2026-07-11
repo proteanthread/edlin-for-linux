@@ -1,17 +1,36 @@
 /*
+ *
+ * VERSION: 3.0.0
+ * LICENSE: MIT License
+ * COPYLEFT: BASIC++ Community
+ *
  * vi.c - Bare minimum vi-style visual text editor
- * Strict C89, compiles cleanly on Linux, Windows 11, and FreeDOS.
+ *
  */
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)
     #define _DEFAULT_SOURCE
     #define _BSD_SOURCE
-    #define _POSIX_SOURCE /* Exposes POSIX unbuffered terminal I/O in strict C89 mode on Linux */
+    #define _POSIX_SOURCE /* Exposes POSIX unbuffered terminal I/O */
 #endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+
+/* Filter to ensure strictly 7-bit ASCII */
+static void sanitize_ascii(char* str) {
+    if (!str) return;
+    char* p = str;
+    while (*str) {
+        if ((unsigned char)(*str) < 128) {
+            *p++ = *str;
+        }
+        str++;
+    }
+    *p = '\0';
+}
 
 /* --- Platform Specific Terminal Handling --- */
 #if defined(_WIN32) || defined(WIN32)
@@ -32,8 +51,8 @@
     struct termios orig_termios;
 #endif
 
-#define MAX_LINES 1000
-#define MAX_LENGTH 255
+#define MAX_VI_LINES 1000
+#define MAX_VI_LENGTH 255
 
 /* --- Extended Key Codes --- */
 #define KEY_UP    1000
@@ -46,18 +65,47 @@
 #define KEY_PGDN  1007
 #define KEY_INS   1008
 #define KEY_DEL   1009
+#define SHIFT_ARROW_UP 1100
+#define SHIFT_ARROW_DOWN 1101
+#define SHIFT_ARROW_LEFT 1102
+#define SHIFT_ARROW_RIGHT 1103
+#define KEY_CTRL_INS 1104
+#define KEY_SHIFT_DEL 1105
+#define KEY_SHIFT_INS 1106
 
-char text_buffer[MAX_LINES][MAX_LENGTH];
-char current_filename[MAX_LENGTH] = "";
-char cmd_buffer[MAX_LENGTH] = "";
+#define KEY_F1    1011
+#define KEY_F2    1012
+#define KEY_F3    1013
+#define KEY_F4    1014
+#define KEY_F5    1015
+#define KEY_F10   1020
+
+char text_buffer[MAX_VI_LINES][MAX_VI_LENGTH];
+char current_filename[MAX_VI_LENGTH] = "";
+char cmd_buffer[MAX_VI_LENGTH] = "";
 
 int current_lines = 0;
 int cursor_r = 0, cursor_c = 0;
 int row_offset = 0;
 int mode = 0; /* 0: Normal, 1: Insert, 2: Command */
 int cmd_len = 0;
-int running = 1;
+bool running = true;
 int screen_rows = 24;
+
+static const char *bright_colors[] = {
+    "\x1b[97m", /* Bright White */
+    "\x1b[96m", /* Bright Cyan */
+    "\x1b[92m", /* Bright Green */
+    "\x1b[93m", /* Bright Yellow */
+    "\x1b[95m", /* Bright Magenta */
+    "\x1b[91m"  /* Bright Red */
+};
+#define NUM_BRIGHT_COLORS (sizeof(bright_colors)/sizeof(bright_colors[0]))
+static int color_index = 0;
+static int pushed_char = -1;
+static bool sel_active = false;
+static int sel_start_r = 0, sel_start_c = 0;
+static int sel_end_r = 0, sel_end_c = 0;
 
 void get_terminal_size(void) {
 #if defined(_WIN32) || defined(WIN32)
@@ -77,7 +125,7 @@ void get_terminal_size(void) {
         screen_rows = 24;
     }
 #endif
-    if (screen_rows < 5) screen_rows = 24; /* Sanity fallback for ridiculously small windows */
+    if (screen_rows < 5) screen_rows = 24;
 }
 
 void reset_term(void) {
@@ -104,14 +152,30 @@ void init_term(void) {
 #endif
 }
 
+static void get_sel_bounds(int *r1, int *c1, int *r2, int *c2) {
+    if (sel_start_r < sel_end_r || (sel_start_r == sel_end_r && sel_start_c <= sel_end_c)) {
+        *r1 = sel_start_r; *c1 = sel_start_c;
+        *r2 = sel_end_r; *c2 = sel_end_c;
+    } else {
+        *r1 = sel_end_r; *c1 = sel_end_c;
+        *r2 = sel_start_r; *c2 = sel_start_c;
+    }
+}
+
 int get_input(void) {
+    if (pushed_char != -1) {
+        int c = pushed_char;
+        pushed_char = -1;
+        return c;
+    }
+
 #if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
     int c = GETCH();
     if (c < 0) {
-        running = 0; 
+        running = false; 
         return 0;
     }
-    if (c == 0 || c == 224) { /* Hardware scan codes */
+    if (c == 0 || c == 224) {
         int seq = GETCH();
         switch (seq) {
             case 72: return KEY_UP;
@@ -129,62 +193,81 @@ int get_input(void) {
     }
     return c;
 #else
-    char c, seq[3];
-    int ret = 27; /* Default fallback is standard ESC */
+    char c, seq1, seq2, seq3;
     if (read(0, &c, 1) != 1) {
-        running = 0;
+        running = false;
         return 0;
     }
     
-    /* Parse ANSI escapes */
     if (c == 27) {
         struct termios raw;
         tcgetattr(0, &raw);
         raw.c_cc[VMIN] = 0;
-        raw.c_cc[VTIME] = 1; /* 100ms timeout for trailing escape chars */
+        raw.c_cc[VTIME] = 1;
         tcsetattr(0, TCSANOW, &raw);
         
-        if (read(0, &seq[0], 1) == 1) {
-            if (seq[0] == '[' || seq[0] == 'O') {
-                if (read(0, &seq[1], 1) == 1) {
-                    if (seq[0] == '[' && seq[1] >= '0' && seq[1] <= '9') {
-                        if (read(0, &seq[2], 1) == 1 && seq[2] == '~') {
-                            switch(seq[1]) {
-                                case '1': ret = KEY_HOME; break;
-                                case '2': ret = KEY_INS;  break;
-                                case '3': ret = KEY_DEL;  break;
-                                case '4': ret = KEY_END;  break;
-                                case '5': ret = KEY_PGUP; break;
-                                case '6': ret = KEY_PGDN; break;
-                                case '7': ret = KEY_HOME; break;
-                                case '8': ret = KEY_END;  break;
+        if (read(0, &seq1, 1) == 1) {
+            if (seq1 == '[' || seq1 == 'O') {
+                if (read(0, &seq2, 1) == 1) {
+                    if (seq1 == '[' && seq2 >= '0' && seq2 <= '9') {
+                        if (read(0, &seq3, 1) == 1) {
+                            if (seq3 == '~') {
+                                tcsetattr(0, TCSANOW, &orig_termios);
+                                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0;
+                                tcsetattr(0, TCSANOW, &raw);
+                                switch(seq2) {
+                                    case '1': return KEY_HOME;
+                                    case '2': return KEY_INS;
+                                    case '3': return KEY_DEL;
+                                    case '4': return KEY_END;
+                                    case '5': return KEY_PGUP;
+                                    case '6': return KEY_PGDN;
+                                    case '7': return KEY_HOME;
+                                    case '8': return KEY_END;
+                                }
+                            } else if (seq2 == '1') {
+                                if (seq3 >= '1' && seq3 <= '5') {
+                                    char seq4;
+                                    if (read(0, &seq4, 1) == 1 && seq4 == '~') {
+                                        raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
+                                        switch(seq3) {
+                                            case '1': return KEY_F1;
+                                            case '2': return KEY_F2;
+                                            case '3': return KEY_F3;
+                                            case '4': return KEY_F4;
+                                            case '5': return KEY_F5;
+                                        }
+                                    }
+                                }
                             }
                         }
                     } else {
-                        if (seq[0] == '[') {
-                            switch(seq[1]) {
-                                case 'A': ret = KEY_UP;    break;
-                                case 'B': ret = KEY_DOWN;  break;
-                                case 'C': ret = KEY_RIGHT; break;
-                                case 'D': ret = KEY_LEFT;  break;
-                                case 'H': ret = KEY_HOME;  break;
-                                case 'F': ret = KEY_END;   break;
+                        raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
+                        if (seq1 == '[') {
+                            switch(seq2) {
+                                case 'A': return KEY_UP;
+                                case 'B': return KEY_DOWN;
+                                case 'C': return KEY_RIGHT;
+                                case 'D': return KEY_LEFT;
+                                case 'H': return KEY_HOME;
+                                case 'F': return KEY_END;
                             }
-                        } else if (seq[0] == 'O') {
-                            switch(seq[1]) {
-                                case 'H': ret = KEY_HOME;  break;
-                                case 'F': ret = KEY_END;   break;
+                        } else if (seq1 == 'O') {
+                            switch(seq2) {
+                                case 'H': return KEY_HOME;
+                                case 'F': return KEY_END;
                             }
                         }
                     }
                 }
+            } else {
+                pushed_char = seq1;
+                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
+                return 27;
             }
         }
-        /* Restore terminal to strict blocking mode */
-        raw.c_cc[VMIN] = 1; 
-        raw.c_cc[VTIME] = 0; 
-        tcsetattr(0, TCSANOW, &raw);
-        return ret;
+        raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
+        return 27;
     }
     return c;
 #endif
@@ -194,8 +277,10 @@ void load_file(const char *filename) {
     FILE *file = fopen(filename, "r");
     current_lines = 0;
     if (file) {
-        while (current_lines < MAX_LINES && fgets(text_buffer[current_lines], MAX_LENGTH, file)) {
-            int len = (int)strlen(text_buffer[current_lines]);
+        while (current_lines < MAX_VI_LINES && fgets(text_buffer[current_lines], MAX_VI_LENGTH, file)) {
+            sanitize_ascii(text_buffer[current_lines]);
+            
+        int len = (int)strlen(text_buffer[current_lines]);
             while (len > 0 && (text_buffer[current_lines][len - 1] == '\n' || text_buffer[current_lines][len - 1] == '\r')) {
                 text_buffer[current_lines][len - 1] = '\0';
                 len--;
@@ -208,15 +293,14 @@ void load_file(const char *filename) {
         text_buffer[0][0] = '\0';
         current_lines = 1;
     }
-    strncpy(current_filename, filename, MAX_LENGTH - 1);
-    current_filename[MAX_LENGTH - 1] = '\0';
+    strncpy(current_filename, filename, MAX_VI_LENGTH - 1);
+    current_filename[MAX_VI_LENGTH - 1] = '\0';
 }
 
 void save_file(void) {
     FILE *file = fopen(current_filename, "w");
     if (file) {
-        int i;
-        for (i = 0; i < current_lines; i++) {
+        for (int i = 0; i < current_lines; i++) {
             fprintf(file, "%s\n", text_buffer[i]);
         }
         fclose(file);
@@ -241,27 +325,45 @@ void fix_cursor(void) {
 }
 
 void render_screen(void) {
-    int i;
     printf("\x1b[?25l"); /* Hide cursor momentarily to prevent flicker */
     printf("\x1b[H");
     
-    for (i = 0; i < screen_rows - 1; i++) {
+    printf("%s", bright_colors[color_index]);
+    
+    for (int i = 0; i < screen_rows - 1; i++) {
         int line_idx = row_offset + i;
         if (line_idx < current_lines) {
-            printf("%s\x1b[K\r\n", text_buffer[line_idx]);
+            printf("%s", bright_colors[color_index]);
+            for (int j = 0; j < (int)strlen(text_buffer[line_idx]); j++) {
+                int in_sel = 0;
+                if (sel_active) {
+                    int r1, c1, r2, c2;
+                    get_sel_bounds(&r1, &c1, &r2, &c2);
+                    if (line_idx > r1 && line_idx < r2) in_sel = 1;
+                    else if (line_idx == r1 && line_idx == r2 && j >= c1 && j < c2) in_sel = 1;
+                    else if (line_idx == r1 && line_idx < r2 && j >= c1) in_sel = 1;
+                    else if (line_idx == r2 && line_idx > r1 && j < c2) in_sel = 1;
+                }
+                if (in_sel) {
+                    printf("\x1b[47;30m%c%s", text_buffer[line_idx][j], bright_colors[color_index]);
+                } else {
+                    printf("%c", text_buffer[line_idx][j]);
+                }
+            }
+            printf("\x1b[K\r\n");
         } else {
-            printf("~\x1b[K\r\n");
+            printf("\x1b[36m~%s\x1b[K\r\n", bright_colors[color_index]);
         }
     }
     
     /* Dynamic Status Line */
-    printf("\x1b[7m");
+    printf("\x1b[47;30m");
     if (mode == 2) {
         printf(":%s\x1b[K", cmd_buffer);
     } else if (mode == 1) {
         printf("-- INSERT --\x1b[K");
     } else {
-        printf("\"%s\" %d lines\x1b[K", current_filename, current_lines);
+        printf("\"%s\" %d:%d\x1b[K", current_filename[0] ? current_filename : "NEW", cursor_r + 1, current_lines);
     }
     printf("\x1b[0m");
     
@@ -294,9 +396,11 @@ void display_help(void) {
     printf("   Backspace        : Delete char or merge lines\r\n\n");
     printf(" COMMAND MODE:\r\n");
     printf("   :w               : Save file\r\n");
+    printf("   :w <file>        : Save to new file\r\n");
     printf("   :q, :q!          : Quit / Quit without saving\r\n");
     printf("   :wq, :x          : Save and Quit\r\n");
-    printf("   :?               : Show this help screen\r\n\n");
+    printf("   :?, :h           : Show this help screen\r\n\n");
+
     printf("Press any key to return...");
     fflush(stdout);
     get_input(); /* Block execution until user returns */
@@ -304,13 +408,12 @@ void display_help(void) {
 
 void handle_normal(int c) {
     static int pending_d = 0;
-    int i;
     
     if (pending_d) {
         pending_d = 0;
         if (c == 'd') {
             if (current_lines > 1) {
-                for (i = cursor_r; i < current_lines - 1; i++) {
+                for (int i = cursor_r; i < current_lines - 1; i++) {
                     strcpy(text_buffer[i], text_buffer[i + 1]);
                 }
                 current_lines--;
@@ -340,7 +443,7 @@ void handle_normal(int c) {
         
         case 'x': case KEY_DEL:
             if (text_buffer[cursor_r][cursor_c] != '\0') {
-                for (i = cursor_c; text_buffer[cursor_r][i]; i++) {
+                for (int i = cursor_c; text_buffer[cursor_r][i]; i++) {
                     text_buffer[cursor_r][i] = text_buffer[cursor_r][i + 1];
                 }
             }
@@ -348,8 +451,8 @@ void handle_normal(int c) {
             
         case 'd': pending_d = 1; break;
         case 'o':
-            if (current_lines < MAX_LINES) {
-                for (i = current_lines; i > cursor_r + 1; i--) {
+            if (current_lines < MAX_VI_LINES) {
+                for (int i = current_lines; i > cursor_r + 1; i--) {
                     strcpy(text_buffer[i], text_buffer[i - 1]);
                 }
                 cursor_r++;
@@ -360,8 +463,8 @@ void handle_normal(int c) {
             }
             break;
         case 'O':
-            if (current_lines < MAX_LINES) {
-                for (i = current_lines; i > cursor_r; i--) {
+            if (current_lines < MAX_VI_LINES) {
+                for (int i = current_lines; i > cursor_r; i--) {
                     strcpy(text_buffer[i], text_buffer[i - 1]);
                 }
                 text_buffer[cursor_r][0] = '\0';
@@ -380,8 +483,6 @@ void handle_normal(int c) {
 }
 
 void handle_insert(int c) {
-    int i, len;
-    
     if (c == 27) { /* Escape */
         mode = 0;
         if (cursor_c > 0) cursor_c--;
@@ -395,25 +496,25 @@ void handle_insert(int c) {
     else if (c == KEY_PGDN) { cursor_r += (screen_rows - 2); }
     else if (c == KEY_DEL) {
         if (text_buffer[cursor_r][cursor_c] != '\0') {
-            for (i = cursor_c; text_buffer[cursor_r][i]; i++) {
+            for (int i = cursor_c; text_buffer[cursor_r][i]; i++) {
                 text_buffer[cursor_r][i] = text_buffer[cursor_r][i + 1];
             }
         } else if (cursor_r < current_lines - 1) {
-            len = (int)strlen(text_buffer[cursor_r]);
-            if (len + (int)strlen(text_buffer[cursor_r + 1]) < MAX_LENGTH) {
-                strcat(text_buffer[cursor_r], text_buffer[cursor_r + 1]);
-                for (i = cursor_r + 1; i < current_lines - 1; i++) {
-                    strcpy(text_buffer[i], text_buffer[i + 1]);
+            int len = (int)strlen(text_buffer[cursor_r]);
+            if (len + (int)strlen(text_buffer[cursor_r + 1]) < MAX_VI_LENGTH) {
+                memmove(&text_buffer[cursor_r][len], text_buffer[cursor_r + 1], strlen(text_buffer[cursor_r + 1]) + 1);
+                for (int i = cursor_r + 1; i < current_lines - 1; i++) {
+                    memmove(text_buffer[i], text_buffer[i + 1], strlen(text_buffer[i + 1]) + 1);
                 }
                 current_lines--;
             }
         }
     } else if (c == 10 || c == 13) { /* Enter */
-        if (current_lines < MAX_LINES) {
-            for (i = current_lines; i > cursor_r; i--) {
-                strcpy(text_buffer[i], text_buffer[i - 1]);
+        if (current_lines < MAX_VI_LINES) {
+            for (int i = current_lines; i > cursor_r; i--) {
+                memmove(text_buffer[i], text_buffer[i - 1], strlen(text_buffer[i - 1]) + 1);
             }
-            strcpy(text_buffer[cursor_r + 1], &text_buffer[cursor_r][cursor_c]);
+            memmove(text_buffer[cursor_r + 1], &text_buffer[cursor_r][cursor_c], strlen(&text_buffer[cursor_r][cursor_c]) + 1);
             text_buffer[cursor_r][cursor_c] = '\0';
             current_lines++;
             cursor_r++;
@@ -421,16 +522,16 @@ void handle_insert(int c) {
         }
     } else if (c == 8 || c == 127) { /* Backspace */
         if (cursor_c > 0) {
-            len = (int)strlen(text_buffer[cursor_r]);
-            for (i = cursor_c; i <= len; i++) {
+            int len = (int)strlen(text_buffer[cursor_r]);
+            for (int i = cursor_c; i <= len; i++) {
                 text_buffer[cursor_r][i - 1] = text_buffer[cursor_r][i];
             }
             cursor_c--;
         } else if (cursor_r > 0) {
             int prev_len = (int)strlen(text_buffer[cursor_r - 1]);
-            if (prev_len + (int)strlen(text_buffer[cursor_r]) < MAX_LENGTH) {
+            if (prev_len + (int)strlen(text_buffer[cursor_r]) < MAX_VI_LENGTH) {
                 strcat(text_buffer[cursor_r - 1], text_buffer[cursor_r]);
-                for (i = cursor_r; i < current_lines - 1; i++) {
+                for (int i = cursor_r; i < current_lines - 1; i++) {
                     strcpy(text_buffer[i], text_buffer[i + 1]);
                 }
                 current_lines--;
@@ -439,14 +540,29 @@ void handle_insert(int c) {
             }
         }
     } else if (c >= 32 && c <= 126) { /* Standard ASCII Characters */
-        len = (int)strlen(text_buffer[cursor_r]);
-        if (len < MAX_LENGTH - 1) {
-            for (i = len; i >= cursor_c; i--) {
+        int len = (int)strlen(text_buffer[cursor_r]);
+        if (len < MAX_VI_LENGTH - 1) {
+            for (int i = len; i >= cursor_c; i--) {
                 text_buffer[cursor_r][i + 1] = text_buffer[cursor_r][i];
             }
             text_buffer[cursor_r][cursor_c] = (char)c;
             cursor_c++;
         }
+    } else if (c == KEY_F1) {
+        display_help();
+    } else if (c == KEY_F2) {
+        if (current_filename[0]) save_file();
+        else {
+            mode = 2;
+            strcpy(cmd_buffer, "w ");
+            cmd_len = 2;
+        }
+    } else if (c == KEY_F3) {
+        mode = 2;
+        strcpy(cmd_buffer, "load ");
+        cmd_len = 5;
+    } else if (c == KEY_F4) {
+        running = false;
     }
 }
 
@@ -455,17 +571,45 @@ void handle_command(int c) {
         mode = 0;
     } else if (c == 10 || c == 13) {
         if (strcmp(cmd_buffer, "w") == 0) save_file();
-        else if (strcmp(cmd_buffer, "q") == 0 || strcmp(cmd_buffer, "q!") == 0) running = 0;
+        else if (strncmp(cmd_buffer, "w ", 2) == 0) {
+            char new_file[MAX_VI_LENGTH];
+            strncpy(new_file, cmd_buffer + 2, MAX_VI_LENGTH - 1);
+            new_file[MAX_VI_LENGTH - 1] = '\0';
+            strcpy(current_filename, new_file);
+            save_file();
+        }
+        else if (strcmp(cmd_buffer, "q") == 0 || strcmp(cmd_buffer, "q!") == 0) running = false;
         else if (strcmp(cmd_buffer, "wq") == 0 || strcmp(cmd_buffer, "x") == 0) {
             save_file();
-            running = 0;
-        } 
-        else if (strcmp(cmd_buffer, "?") == 0) display_help();
+            running = false;
+        }
+        else if (strncmp(cmd_buffer, "load ", 5) == 0) {
+            char new_file[MAX_VI_LENGTH];
+            strncpy(new_file, cmd_buffer + 5, MAX_VI_LENGTH - 1);
+            new_file[MAX_VI_LENGTH - 1] = '\0';
+            strcpy(current_filename, new_file);
+            load_file(current_filename);
+        }
+        else if (strcmp(cmd_buffer, "color") == 0) {
+            color_index = (color_index + 1) % NUM_BRIGHT_COLORS;
+        }
+        else if (strncmp(cmd_buffer, "color ", 6) == 0) {
+            char new_color[MAX_VI_LENGTH];
+            strncpy(new_color, cmd_buffer + 6, MAX_VI_LENGTH - 1);
+            new_color[MAX_VI_LENGTH - 1] = '\0';
+            if (strcmp(new_color, "white") == 0) color_index = 0;
+            else if (strcmp(new_color, "cyan") == 0) color_index = 1;
+            else if (strcmp(new_color, "green") == 0) color_index = 2;
+            else if (strcmp(new_color, "yellow") == 0) color_index = 3;
+            else if (strcmp(new_color, "magenta") == 0) color_index = 4;
+            else if (strcmp(new_color, "red") == 0) color_index = 5;
+        }
+        else if (strcmp(cmd_buffer, "?") == 0 || strcmp(cmd_buffer, "h") == 0) display_help();
         mode = 0;
     } else if (c == 8 || c == 127) {
         if (cmd_len > 0) cmd_buffer[--cmd_len] = '\0';
         else mode = 0;
-    } else if (c >= 32 && c <= 126 && cmd_len < MAX_LENGTH - 1) {
+    } else if (c >= 32 && c <= 126 && cmd_len < MAX_VI_LENGTH - 1) {
         cmd_buffer[cmd_len++] = (char)c;
         cmd_buffer[cmd_len] = '\0';
     }
@@ -475,16 +619,16 @@ void exit_editor(void) {
     printf("\x1b[2J\x1b[H\x1b[?25h"); /* Restore Screen bounds and physical cursor pointer */
     fflush(stdout);
     reset_term();
-    exit(0);
 }
 
 int main(int argc, char *argv[]) {
     int c;
+
     if (argc > 1) {
         load_file(argv[1]);
     } else {
-        printf("Usage: vi <filename>\n");
-        return 1;
+        current_lines = 1;
+        text_buffer[0][0] = '\0';
     }
     
     init_term();

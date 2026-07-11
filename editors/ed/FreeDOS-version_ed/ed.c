@@ -1,5 +1,4 @@
 /*
- *
  * VERSION: 1.3.2
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community

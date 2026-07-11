@@ -5,7 +5,6 @@
  * COPYLEFT: BASIC++ Community
  *
  * edlin.c - based on the original MSDOS line editor
- *
  */
 
 #include <stdio.h>

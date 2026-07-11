@@ -1,7 +1,7 @@
 /* 
  *
  * Standalone DOS EDLIN Clone
- * VERSION: 3.0.0
+ * VERSION: 3.1.0
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
  *
@@ -41,8 +41,6 @@ static void sanitize_ascii(char* str) {
 #include <unistd.h>
 #endif
 
-#define MAX_EDLIN_LINES 1000
-#define MAX_EDLIN_LENGTH 255
 
 static const char *bright_colors[] = {
     "\x1b[97m", /* Bright White */
@@ -59,10 +57,66 @@ static int color_index = 0;
  * Internal State
  * ===================================================================== */
 
-static char edlin_buffer[MAX_EDLIN_LINES][MAX_EDLIN_LENGTH];
+typedef struct {
+    char *text;
+    size_t length;
+    size_t capacity;
+} Line;
+static Line *edlin_buffer = NULL;
+static int edlin_buffer_capacity = 0;
 static int  edlin_line_count = 0;
 static int  edlin_page_pos   = 0;
-static char edlin_filename[MAX_EDLIN_LENGTH] = "";
+static char edlin_filename[4096] = "";
+
+static void oom(void) {
+    fprintf(stderr, "\n\nOut of memory!\n");
+    exit(1);
+}
+
+static void ensure_line_capacity(int row, size_t needed) {
+    if (needed > edlin_buffer[row].capacity) {
+        size_t new_cap = edlin_buffer[row].capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 128) new_cap = 128;
+        char *new_text = realloc(edlin_buffer[row].text, new_cap);
+        if (!new_text) oom();
+        edlin_buffer[row].text = new_text;
+        edlin_buffer[row].capacity = new_cap;
+    }
+}
+
+static void ensure_buffer_capacity(int needed) {
+    if (needed > edlin_buffer_capacity) {
+        int new_cap = edlin_buffer_capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 256) new_cap = 256;
+        Line *new_buf = realloc(edlin_buffer, new_cap * sizeof(Line));
+        if (!new_buf) oom();
+        edlin_buffer = new_buf;
+        edlin_buffer_capacity = new_cap;
+    }
+}
+
+static void free_line(int row) {
+    if (edlin_buffer[row].text) {
+        free(edlin_buffer[row].text);
+        edlin_buffer[row].text = NULL;
+    }
+}
+
+static void insert_empty_line_at(int row) {
+    ensure_buffer_capacity(edlin_line_count + 1);
+    for (int i = edlin_line_count; i > row; i--) {
+        edlin_buffer[i] = edlin_buffer[i - 1];
+    }
+    edlin_buffer[row].text = malloc(128);
+    if (!edlin_buffer[row].text) oom();
+    edlin_buffer[row].text[0] = '\0';
+    edlin_buffer[row].length = 0;
+    edlin_buffer[row].capacity = 128;
+    edlin_line_count++;
+}
+
 
 /* =====================================================================
  * Output Helpers
@@ -113,9 +167,9 @@ static char *edlin_read_line(char *buf, size_t max_len)
 
 static int edlin_get_int_prompt(const char *prompt)
 {
-    char input[MAX_EDLIN_LENGTH];
+    char input[4096];
     edlin_print("%s", prompt);
-    if (edlin_read_line(input, MAX_EDLIN_LENGTH) == NULL) {
+    if (edlin_read_line(input, 4096) == NULL) {
         return 0;
     }
     char *endptr = NULL;
@@ -129,7 +183,7 @@ static int edlin_get_int_prompt(const char *prompt)
 static void edlin_get_string_prompt(const char *prompt, char *buffer)
 {
     edlin_print("%s", prompt);
-    if (edlin_read_line(buffer, MAX_EDLIN_LENGTH) != NULL) {
+    if (edlin_read_line(buffer, 4096) != NULL) {
         buffer[strcspn(buffer, "\n")] = '\0';
     } else {
         buffer[0] = '\0';
@@ -164,27 +218,32 @@ static void display_edlin_help(void)
 
 static void load_edlin_file(const char *filename)
 {
+    if (edlin_buffer) {
+        for (int i = 0; i < edlin_line_count; i++) free_line(i);
+    }
+    edlin_line_count = 0;
     FILE *file = fopen(filename, "r");
     if (file != NULL) {
-        edlin_line_count = 0;
-        while (edlin_line_count < MAX_EDLIN_LINES &&
-               fgets(edlin_buffer[edlin_line_count], MAX_EDLIN_LENGTH, file) != NULL) {
-            
-        size_t len = strlen(edlin_buffer[edlin_line_count]);
-            if (len > 0 && edlin_buffer[edlin_line_count][len - 1] == '\n') {
-                edlin_buffer[edlin_line_count][len - 1] = '\0';
+        char line_buf[4096];
+        while (fgets(line_buf, sizeof(line_buf), file) != NULL) {
+            size_t len = strlen(line_buf);
+            if (len > 0 && line_buf[len - 1] == '\n') {
+                line_buf[len - 1] = '\0'; len--;
             }
-            if (len > 1 && edlin_buffer[edlin_line_count][len - 2] == '\r') {
-                edlin_buffer[edlin_line_count][len - 2] = '\0';
+            if (len > 0 && line_buf[len - 1] == '\r') {
+                line_buf[len - 1] = '\0'; len--;
             }
-            edlin_line_count++;
+            insert_empty_line_at(edlin_line_count);
+            ensure_line_capacity(edlin_line_count - 1, len + 1);
+            strcpy(edlin_buffer[edlin_line_count - 1].text, line_buf);
+            edlin_buffer[edlin_line_count - 1].length = len;
         }
         fclose(file);
         edlin_print("End of input file\n");
     } else {
         edlin_print("New file\n");
     }
-    snprintf(edlin_filename, MAX_EDLIN_LENGTH, "%s", filename);
+    snprintf(edlin_filename, 4096, "%s", filename);
 }
 
 static void save_edlin_file(void)
@@ -195,7 +254,7 @@ static void save_edlin_file(void)
         return;
     }
     for (int i = 0; i < edlin_line_count; i++) {
-        fprintf(file, "%s\n", edlin_buffer[i]);
+        fprintf(file, "%s\n", edlin_buffer[i].text);
     }
     fclose(file);
 }
@@ -203,22 +262,17 @@ static void save_edlin_file(void)
 static void list_edlin_lines(void)
 {
     for (int i = 0; i < edlin_line_count; i++) {
-        edlin_print("%d: %s\n", i + 1, edlin_buffer[i]);
+        edlin_print("%d: %s\n", i + 1, edlin_buffer[i].text);
     }
 }
 
 static void insert_edlin_line(void)
 {
-    char input[MAX_EDLIN_LENGTH];
+    char input[4096];
 
-    if (edlin_line_count >= MAX_EDLIN_LINES) {
-        edlin_print("Error: Buffer is full (%d lines).\n", MAX_EDLIN_LINES);
-        return;
-    }
-
-    while (edlin_line_count < MAX_EDLIN_LINES) {
+    while (1) {
         edlin_print("%d:*", edlin_line_count + 1);
-        if (edlin_read_line(input, MAX_EDLIN_LENGTH) == NULL) {
+        if (edlin_read_line(input, 4096) == NULL) {
             break;
         }
         input[strcspn(input, "\n")] = '\0';
@@ -227,8 +281,11 @@ static void insert_edlin_line(void)
         if (strcmp(input, ".") == 0) {
             break;
         }
-        snprintf(edlin_buffer[edlin_line_count], MAX_EDLIN_LENGTH, "%s", input);
-        edlin_line_count++;
+        insert_empty_line_at(edlin_line_count);
+        size_t len = strlen(input);
+        ensure_line_capacity(edlin_line_count - 1, len + 1);
+        strcpy(edlin_buffer[edlin_line_count - 1].text, input);
+        edlin_buffer[edlin_line_count - 1].length = len;
     }
 }
 
@@ -241,8 +298,9 @@ static void delete_edlin_line(void)
 
     int index = edlin_get_int_prompt("Line to delete: ") - 1;
     if (index >= 0 && index < edlin_line_count) {
+        free_line(index);
         for (int i = index; i < edlin_line_count - 1; i++) {
-            memmove(edlin_buffer[i], edlin_buffer[i + 1], strlen(edlin_buffer[i + 1]) + 1);
+            edlin_buffer[i] = edlin_buffer[i + 1];
         }
         edlin_line_count--;
         edlin_print("Line deleted.\n");
@@ -253,17 +311,20 @@ static void delete_edlin_line(void)
 
 static void edit_edlin_line(int index)
 {
-    char input[MAX_EDLIN_LENGTH];
+    char input[4096];
 
     if (index >= 0 && index < edlin_line_count) {
-        edlin_print("%d: %s\n", index + 1, edlin_buffer[index]);
+        edlin_print("%d: %s\n", index + 1, edlin_buffer[index].text);
         edlin_print("%d:*", index + 1);
-        if (edlin_read_line(input, MAX_EDLIN_LENGTH) != NULL) {
+        if (edlin_read_line(input, 4096) != NULL) {
             input[strcspn(input, "\n")] = '\0';
             if (input[strcspn(input, "\r")] == '\r') input[strcspn(input, "\r")] = '\0';
             
             if (strlen(input) > 0) {
-                snprintf(edlin_buffer[index], MAX_EDLIN_LENGTH, "%s", input);
+                size_t len = strlen(input);
+                ensure_line_capacity(index, len + 1);
+                strcpy(edlin_buffer[index].text, input);
+                edlin_buffer[index].length = len;
             }
         }
     } else {
@@ -288,18 +349,20 @@ static void copy_edlin_lines(void)
     }
 
     int count = end - start + 1;
-    if (edlin_line_count + count > MAX_EDLIN_LINES) {
-        edlin_print("Error: Buffer limit reached.\n");
-        return;
-    }
+    ensure_buffer_capacity(edlin_line_count + count);
 
     for (int i = edlin_line_count - 1; i >= dest; i--) {
-        memmove(edlin_buffer[i + count], edlin_buffer[i], strlen(edlin_buffer[i]) + 1);
+        edlin_buffer[i + count] = edlin_buffer[i];
     }
 
     int src_offset = (dest < start) ? count : 0;
     for (int j = 0; j < count; j++) {
-        memmove(edlin_buffer[dest + j], edlin_buffer[start + src_offset + j], strlen(edlin_buffer[start + src_offset + j]) + 1);
+        size_t len = edlin_buffer[start + src_offset + j].length;
+        edlin_buffer[dest + j].text = malloc(len + 1);
+        if (!edlin_buffer[dest + j].text) oom();
+        strcpy(edlin_buffer[dest + j].text, edlin_buffer[start + src_offset + j].text);
+        edlin_buffer[dest + j].length = len;
+        edlin_buffer[dest + j].capacity = len + 1;
     }
     edlin_line_count += count;
     edlin_print("%d lines copied.\n", count);
@@ -322,26 +385,27 @@ static void move_edlin_lines(void)
     }
 
     int count = end - start + 1;
+    ensure_buffer_capacity(edlin_line_count + count);
 
     for (int i = edlin_line_count - 1; i >= dest; i--) {
-        memmove(edlin_buffer[i + count], edlin_buffer[i], strlen(edlin_buffer[i]) + 1);
+        edlin_buffer[i + count] = edlin_buffer[i];
     }
 
     int del_start;
     if (dest < start) {
         for (int j = 0; j < count; j++) {
-            memmove(edlin_buffer[dest + j], edlin_buffer[start + count + j], strlen(edlin_buffer[start + count + j]) + 1);
+            edlin_buffer[dest + j] = edlin_buffer[start + count + j];
         }
         del_start = start + count;
     } else {
         for (int j = 0; j < count; j++) {
-            memmove(edlin_buffer[dest + j], edlin_buffer[start + j], strlen(edlin_buffer[start + j]) + 1);
+            edlin_buffer[dest + j] = edlin_buffer[start + j];
         }
         del_start = start;
     }
 
     for (int i = del_start; i < edlin_line_count; i++) {
-        memmove(edlin_buffer[i], edlin_buffer[i + count], strlen(edlin_buffer[i + count]) + 1);
+        edlin_buffer[i] = edlin_buffer[i + count];
     }
     edlin_print("%d lines moved.\n", count);
 }
@@ -358,7 +422,7 @@ static void page_edlin_display(void)
     }
 
     for (int i = edlin_page_pos; i < end; i++) {
-        edlin_print("%d: %s\n", i + 1, edlin_buffer[i]);
+        edlin_print("%d: %s\n", i + 1, edlin_buffer[i].text);
     }
     edlin_page_pos = end;
 }
@@ -367,7 +431,7 @@ static void search_edlin_text(void)
 {
     int start = edlin_get_int_prompt("Start line: ") - 1;
     int end   = edlin_get_int_prompt("End line: ") - 1;
-    char search_str[MAX_EDLIN_LENGTH];
+    char search_str[4096];
     int found = 0;
 
     edlin_get_string_prompt("Search for: ", search_str);
@@ -377,8 +441,8 @@ static void search_edlin_text(void)
     }
 
     for (int i = start; i <= end; i++) {
-        if (strstr(edlin_buffer[i], search_str) != NULL) {
-            edlin_print("%d: %s\n", i + 1, edlin_buffer[i]);
+        if (strstr(edlin_buffer[i].text, search_str) != NULL) {
+            edlin_print("%d: %s\n", i + 1, edlin_buffer[i].text);
             found++;
         }
     }
@@ -389,8 +453,8 @@ static void replace_edlin_text(void)
 {
     int start = edlin_get_int_prompt("Start line: ") - 1;
     int end   = edlin_get_int_prompt("End line: ") - 1;
-    char search_str[MAX_EDLIN_LENGTH];
-    char replace_str[MAX_EDLIN_LENGTH];
+    char search_str[4096];
+    char replace_str[4096];
     int replaced = 0;
 
     edlin_get_string_prompt("Search for: ", search_str);
@@ -402,19 +466,19 @@ static void replace_edlin_text(void)
     }
 
     for (int i = start; i <= end; i++) {
-        char *pos = strstr(edlin_buffer[i], search_str);
+        char *pos = strstr(edlin_buffer[i].text, search_str);
         if (pos != NULL) {
-            char temp[MAX_EDLIN_LENGTH * 2];
-            int prefix_len = (int)(pos - edlin_buffer[i]);
+            char temp[8192];
+            int prefix_len = (int)(pos - edlin_buffer[i].text);
             snprintf(temp, sizeof(temp), "%.*s%s%s",
-                     prefix_len, edlin_buffer[i],
+                     prefix_len, edlin_buffer[i].text,
                      replace_str,
                      pos + strlen(search_str));
             size_t temp_len = strlen(temp);
-            size_t copy_len = temp_len < (size_t)(MAX_EDLIN_LENGTH - 1) ? temp_len : (size_t)(MAX_EDLIN_LENGTH - 1);
-            memcpy(edlin_buffer[i], temp, copy_len);
-            edlin_buffer[i][copy_len] = '\0';
-            edlin_print("%d: %s\n", i + 1, edlin_buffer[i]);
+            ensure_line_capacity(i, temp_len + 1);
+            strcpy(edlin_buffer[i].text, temp);
+            edlin_buffer[i].length = temp_len;
+            edlin_print("%d: %s\n", i + 1, edlin_buffer[i].text);
             replaced++;
         }
     }
@@ -424,8 +488,8 @@ static void replace_edlin_text(void)
 static void transfer_edlin_file(void)
 {
     int dest = edlin_get_int_prompt("Insert before line: ") - 1;
-    char filename[MAX_EDLIN_LENGTH];
-    char input[MAX_EDLIN_LENGTH];
+    char filename[4096];
+    char input[4096];
 
     edlin_get_string_prompt("Filename: ", filename);
     if (dest < 0) dest = 0;
@@ -437,17 +501,15 @@ static void transfer_edlin_file(void)
         return;
     }
 
-    while (edlin_line_count < MAX_EDLIN_LINES &&
-           fgets(input, MAX_EDLIN_LENGTH, f) != NULL) {
-        
+    while (fgets(input, sizeof(input), f) != NULL) {
         input[strcspn(input, "\n")] = '\0';
         if (input[strcspn(input, "\r")] == '\r') input[strcspn(input, "\r")] = '\0';
         
-        for (int i = edlin_line_count; i > dest; i--) {
-            memmove(edlin_buffer[i], edlin_buffer[i - 1], strlen(edlin_buffer[i - 1]) + 1);
-        }
-        snprintf(edlin_buffer[dest], MAX_EDLIN_LENGTH, "%s", input);
-        edlin_line_count++;
+        insert_empty_line_at(dest);
+        size_t len = strlen(input);
+        ensure_line_capacity(dest, len + 1);
+        strcpy(edlin_buffer[dest].text, input);
+        edlin_buffer[dest].length = len;
         dest++;
     }
     fclose(f);
@@ -467,12 +529,15 @@ static void write_edlin_lines(void)
         return;
     }
     for (int i = 0; i < count; i++) {
-        fprintf(file, "%s\n", edlin_buffer[i]);
+        fprintf(file, "%s\n", edlin_buffer[i].text);
     }
     fclose(file);
 
+    for (int i = 0; i < count; i++) {
+        free_line(i);
+    }
     for (int i = count; i < edlin_line_count; i++) {
-        memmove(edlin_buffer[i - count], edlin_buffer[i], strlen(edlin_buffer[i]) + 1);
+        edlin_buffer[i - count] = edlin_buffer[i];
     }
     edlin_line_count -= count;
     edlin_print("%d lines written to disk and cleared from memory.\n", count);
@@ -480,13 +545,8 @@ static void write_edlin_lines(void)
 
 static void append_edlin_lines(void)
 {
-    char input[MAX_EDLIN_LENGTH];
+    char input[4096];
     int appended = 0;
-
-    if (edlin_line_count >= MAX_EDLIN_LINES) {
-        edlin_print("Error: Buffer is full.\n");
-        return;
-    }
 
     FILE *file = fopen(edlin_filename, "r");
     if (file == NULL) {
@@ -495,19 +555,20 @@ static void append_edlin_lines(void)
     }
 
     int skip = edlin_line_count;
-    while (skip > 0 && fgets(input, MAX_EDLIN_LENGTH, file) != NULL) {
+    while (skip > 0 && fgets(input, sizeof(input), file) != NULL) {
         sanitize_ascii(input);
-        
         skip--;
     }
 
-    while (edlin_line_count < MAX_EDLIN_LINES &&
-           fgets(input, MAX_EDLIN_LENGTH, file) != NULL) {
-        
+    while (fgets(input, sizeof(input), file) != NULL) {
         input[strcspn(input, "\n")] = '\0';
         if (input[strcspn(input, "\r")] == '\r') input[strcspn(input, "\r")] = '\0';
-        snprintf(edlin_buffer[edlin_line_count], MAX_EDLIN_LENGTH, "%s", input);
-        edlin_line_count++;
+        
+        insert_empty_line_at(edlin_line_count);
+        size_t len = strlen(input);
+        ensure_line_capacity(edlin_line_count - 1, len + 1);
+        strcpy(edlin_buffer[edlin_line_count - 1].text, input);
+        edlin_buffer[edlin_line_count - 1].length = len;
         appended++;
     }
     fclose(file);
@@ -533,12 +594,12 @@ int main(int argc, char **argv)
 
     edlin_print("%s", bright_colors[color_index]);
 
-    char command[MAX_EDLIN_LENGTH];
+    char command[4096];
 
     edlin_line_count = 0;
     edlin_page_pos   = 0;
     memset(edlin_filename, 0, sizeof(edlin_filename));
-    memset(edlin_buffer, 0, sizeof(edlin_buffer));
+    // memset(edlin_buffer, 0, sizeof(edlin_buffer));
 
     if (argc > 1) {
         load_edlin_file(argv[1]);
@@ -548,7 +609,7 @@ int main(int argc, char **argv)
 
     for (;;) {
         edlin_print("*");
-        if (edlin_read_line(command, MAX_EDLIN_LENGTH) == NULL) {
+        if (edlin_read_line(command, 4096) == NULL) {
             break;
         }
         command[strcspn(command, "\n")] = '\0';

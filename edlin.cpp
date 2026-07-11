@@ -1,7 +1,7 @@
 /*
  * edlin.cpp - Portable Line Editor (colored syntax edition)
  * Standalone DOS EDLIN Clone
- * VERSION: 3.0.0
+ * VERSION: 3.1.0
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
  *
@@ -21,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
+#include <vector>
 #include <string_view>
 
 /* Platform Detection */
@@ -42,7 +44,7 @@
 #define LINE_LENGTH  128   /* Maximum bytes per line (127 chars + NUL). */
 #define PAGE_LENGTH   23   /* Lines shown by the 'p' (page) command.   */
 
-static constexpr const char *EDLIN_VERSION = "2.0.0";
+static constexpr const char *EDLIN_VERSION = "3.1.0";
 
 /* 
  *  SECTION 1 - Color / Terminal Configuration
@@ -152,8 +154,7 @@ public:
     /* Detect language from filename extension; fall back to content heuristics. */
     static cfg::Lang detect_language(
         const char *filename,
-        const std::array<std::array<char, LINE_LENGTH>, MAX_LINES> &buf,
-        int lines)
+        const std::vector<std::string> &buf)
     {
         std::string_view fn(filename ? filename : "");
 
@@ -191,7 +192,7 @@ public:
         if (ends(".yml") || ends(".yaml"))        return cfg::Lang::YAML;
         if (ends(".json"))                        return cfg::Lang::JSON;
 
-        return detect_by_content(buf, lines);
+        return detect_by_content(buf);
     }
 
     /* Print one line with ANSI color codes, if the terminal supports them. */
@@ -390,8 +391,7 @@ private:
 
     /* Heuristic content-based language detection (scans first 80 lines). */
     static cfg::Lang detect_by_content(
-        const std::array<std::array<char, LINE_LENGTH>, MAX_LINES> &buf,
-        int lines)
+        const std::vector<std::string> &buf)
     {
         /* Per-language score accumulators. */
         int cpp = 0, js = 0, java = 0, asmx = 0, pas = 0, bas  = 0,
@@ -437,9 +437,9 @@ private:
         const std::array<std::string_view, 4> v4 = {"$","@","_","this"};
         const std::array<std::string_view, 4> r4 = {"//","#",";","--"};
 
-        const int limit = std::min(lines, 80);
+        const int limit = std::min(static_cast<int>(buf.size()), 80);
         for (int i = 0; i < limit; ++i) {
-            std::string_view l(buf[static_cast<size_t>(i)].data());
+            std::string_view l(buf[static_cast<size_t>(i)].c_str());
             cpp  += score_line(l, cpp_kw,  e8, e8, e8, v4, r4);
             js   += score_line(l, js_kw,   e8, e8, e8, v4, r4);
             java += score_line(l, java_kw, e8, e8, e8, v4, r4);
@@ -483,23 +483,13 @@ private:
  */
 
 class EdlinEditor {
-
-    /* -- Data members ------------------------------------------------------- */
-
-    std::array<std::array<char, LINE_LENGTH>, MAX_LINES> text_buffer{};
-    int current_lines    = 0;
-    int current_page     = 0;
-    std::array<char, LINE_LENGTH> current_filename{};
+    std::vector<std::string> text_buffer;
+    int current_page = 0;
+    std::string current_filename;
     cfg::Lang current_lang = cfg::Lang::UNKNOWN;
 
-    /* Private helpers */
+    const char* buf(int i) const { return text_buffer[static_cast<size_t>(i)].c_str(); }
 
-    /* Accessor that safely casts to size_t to avoid sign-conversion warnings */
-    char* buf(int i) { return text_buffer[static_cast<size_t>(i)].data(); }
-    const char* buf(int i) const { return text_buffer[static_cast<size_t>(i)].data(); }
-
-
-    /* Filter to ensure strictly 7-bit ASCII */
     static void sanitize_ascii(char* str) {
         if (!str) return;
         char* p = str;
@@ -512,67 +502,42 @@ class EdlinEditor {
         *p = '\0';
     }
 
-    /* Safe copy that guarantees NUL-termination */
-    static void safe_copy(char* dst, const char* src) {
-        std::strncpy(dst, src, LINE_LENGTH - 1);
-        dst[LINE_LENGTH - 1] = '\0';
-    }
-
-    /* Prompt, read a line, return its integer value (0 on EOF/error). */
-    int get_int_prompt(const char *prompt)
-    {
-        char input[LINE_LENGTH];
+    int get_int_prompt(const char *prompt) {
+        char input[4096];
         std::cout << prompt;
-        if (!std::fgets(input, LINE_LENGTH, stdin)) return 0;
+        if (!std::fgets(input, sizeof(input), stdin)) return 0;
         sanitize_ascii(input);
         return std::atoi(input);
     }
 
-    /* Prompt, read a line into buffer, strip trailing newline. */
-    void get_string_prompt(const char *prompt, char *buffer)
-    {
-        
-        
+    void get_string_prompt(const char *prompt, char *buffer) {
+        char input[4096];
         std::cout << prompt;
-        if (std::fgets(buffer, LINE_LENGTH, stdin)) {
-            sanitize_ascii(buffer);
-            
-        buffer[std::strcspn(buffer, "\n")] = '\0';
+        if (std::fgets(input, sizeof(input), stdin)) {
+            sanitize_ascii(input);
+            input[std::strcspn(input, "\n")] = '\0';
+            std::strncpy(buffer, input, 4095);
+            buffer[4095] = '\0';
         } else {
             buffer[0] = '\0';
         }
     }
 
-    /*
-     * Print one line with its 1-based line number, right-aligned to the
-     * width of current_lines, followed by syntax highlighting.
-     */
-    void print_line(int i) const
-    {
-        /* Compute digit widths for right-alignment. */
-        int width  = 1;
-        int n      = current_lines;
+    void print_line(int i) const {
+        int width = 1;
+        int n = static_cast<int>(text_buffer.size());
         while (n >= 10) { n /= 10; ++width; }
-
         const int line_no = i + 1;
         int digits = 1;
         n = line_no;
         while (n >= 10) { n /= 10; ++digits; }
-
         for (int pad = width - digits; pad > 0; --pad) std::cout << ' ';
         std::cout << line_no << ": ";
         SyntaxHighlighter::print_highlighted(buf(i), current_lang);
     }
 
-    /* Range-validation helper */
-
-    /*
-     * Returns true and prints an error if [start, end] is not a valid
-     * sub-range of [0, current_lines-1].
-     */
-    bool bad_range(int start, int end) const
-    {
-        if (start < 0 || end >= current_lines || start > end) {
+    bool bad_range(int start, int end) const {
+        if (start < 0 || end >= (int)text_buffer.size() || start > end) {
             std::cout << "Error: Invalid range.\n";
             return true;
         }
@@ -580,401 +545,252 @@ class EdlinEditor {
     }
 
 public:
-
-    /* Public interface command implementations */
-
-    /* 'h' / '?' - Show the full built-in help, matching the edlin.c 1.3.1
-     *             command table exactly; also reports compile-time limits. */
-    void display_help() const
-    {
-        std::cout << "\nedlin - Portable Line Editor (Version "
-                  << EDLIN_VERSION << ")\n";
-        std::cout << "Buffer limits:  Lines: " << MAX_LINES
-                  << ",  Line Length: " << LINE_LENGTH
-                  << ",  Page Length: Dynamic\n";
+    void display_help() const {
+        std::cout << "\nedlin - Portable Line Editor (Version " << EDLIN_VERSION << ")\n";
+        std::cout << "Buffer limits:  Lines: Dynamic,  Line Length: Dynamic,  Page Length: Dynamic\n";
         std::cout << "Available Commands:\n";
         std::cout << "  [line] - Edit a specific line (enter line number)\n";
         std::cout << "  a     - Append lines from disk into memory\n";
         std::cout << "  c     - Copy lines\n";
         std::cout << "  d     - Delete line(s)\n";
         std::cout << "  e     - End editing (Save and Exit)\n";
-        std::cout << "  h, ?  - Display this built-in help message\n";
-        std::cout << "  i     - Insert lines at the end of the file\n";
-        std::cout << "  l     - List all lines currently in the memory buffer\n";
-        std::cout << "  m     - Move lines\n";
+        std::cout << "  h / ? - Display this help screen\n";
+        std::cout << "  i     - Insert line(s)\n";
+        std::cout << "  l     - List line(s)\n";
+        std::cout << "  m     - Move line(s)\n";
         std::cout << "  p     - Page display\n";
-        std::cout << "  q     - Quit the editor immediately without saving changes\n";
+        std::cout << "  q     - Quit (without saving)\n";
         std::cout << "  r     - Replace text\n";
         std::cout << "  s     - Search text\n";
-        std::cout << "  t     - Transfer (merge) another file\n";
-        std::cout << "  w     - Write lines to disk\n\n";
+        std::cout << "  t     - Transfer file\n";
+        std::cout << "  w     - Write lines to disk\n";
+        std::cout << "--------------------------------------------------------\n";
     }
 
-    /* Load filename into the buffer; create a new buffer if the file is absent. */
-    void load_file(const char *filename)
-    {
+    void load_file(const char *filename) {
+        text_buffer.clear();
+        current_filename = filename;
         FILE *f = std::fopen(filename, "r");
-        if (f) {
-            current_lines = 0;
-            while (current_lines < MAX_LINES &&
-                   std::fgets(buf(current_lines), LINE_LENGTH, f)) {
-                
-        
-        size_t len = std::strlen(buf(current_lines));
-                if (len && text_buffer[static_cast<size_t>(current_lines)][len - 1] == '\n') {
-                    text_buffer[static_cast<size_t>(current_lines)][len - 1] = '\0';
-                }
-                ++current_lines;
-            }
-            std::fclose(f);
-            std::cout << "End of input file\n";
-        } else {
-            std::cout << "New file\n";
-        }
-
-        std::strncpy(current_filename.data(), filename, LINE_LENGTH - 1);
-        current_filename[LINE_LENGTH - 1] = '\0';
-
-        current_lang = SyntaxHighlighter::detect_language(
-            current_filename.data(), text_buffer, current_lines);
-    }
-
-    /* Write the full buffer to disk (overwrites existing content). */
-    void save_file()
-    {
-        FILE *f = std::fopen(current_filename.data(), "w");
         if (!f) {
-            std::cout << "Error: Cannot save file.\n";
+            std::cout << "New file.\n";
             return;
         }
-        for (int i = 0; i < current_lines; ++i) {
-            std::fprintf(f, "%s\n", buf(i));
+        char input[4096];
+        while (std::fgets(input, sizeof(input), f)) {
+            sanitize_ascii(input);
+            size_t len = std::strlen(input);
+            if (len && input[len - 1] == '\n') input[len - 1] = '\0';
+            text_buffer.emplace_back(input);
         }
         std::fclose(f);
+        current_lang = SyntaxHighlighter::detect_language(current_filename.c_str(), text_buffer);
     }
 
-    /* 'l' - List all lines with line numbers and syntax highlighting. */
-    void list_lines()
-    {
-        for (int i = 0; i < current_lines; ++i) {
+    void save_file() const {
+        if (current_filename.empty()) {
+            std::cout << "No filename specified.\n";
+            return;
+        }
+        FILE *f = std::fopen(current_filename.c_str(), "w");
+        if (!f) {
+            std::cout << "Error writing to file.\n";
+            return;
+        }
+        for (const auto& line : text_buffer) {
+            std::fprintf(f, "%s\n", line.c_str());
+        }
+        std::fclose(f);
+        std::cout << "Saved " << current_filename << "\n";
+    }
+
+    void list_lines(int start, int end) const {
+        if (text_buffer.empty()) { std::cout << "(empty)\n"; return; }
+        if (bad_range(start, end)) return;
+        for (int i = start; i <= end; ++i) {
             print_line(i);
         }
     }
 
-    /* 'i' - Append new lines interactively; '.' on its own line to stop. */
-    void insert_line()
-    {
-        char input[LINE_LENGTH];
-        while (current_lines < MAX_LINES) {
-            std::cout << (current_lines + 1) << ":*";
-            if (!std::fgets(input, LINE_LENGTH, stdin)) break;
+    void insert_lines() {
+        char input[4096];
+        while (true) {
+            std::cout << (text_buffer.size() + 1) << ":*";
+            if (!std::fgets(input, sizeof(input), stdin)) break;
             sanitize_ascii(input);
             input[std::strcspn(input, "\n")] = '\0';
             if (std::strcmp(input, ".") == 0) break;
-            safe_copy(buf(current_lines), input);
-            ++current_lines;
+            text_buffer.emplace_back(input);
         }
+        current_lang = SyntaxHighlighter::detect_language(current_filename.c_str(), text_buffer);
     }
 
-    /* 'd' - Delete a single line by 1-based number. */
-    void delete_line()
-    {
-        
-        
-        if (current_lines == 0) {
-            std::cout << "Error: Buffer is empty.\n";
+    void edit_line(int idx) {
+        if (text_buffer.empty()) {
+            std::cout << "(empty)\n";
             return;
         }
-
-        const int idx = get_int_prompt("Line to delete: ") - 1;
-        if (idx < 0 || idx >= current_lines) {
+        if (idx < 0 || idx >= (int)text_buffer.size()) {
             std::cout << "Error: Invalid line number.\n";
             return;
         }
-
-        for (int i = idx; i < current_lines - 1; ++i) {
-            safe_copy(buf(i), buf(i + 1));
-        }
-        --current_lines;
-        std::cout << "Line deleted.\n";
-    }
-
-    /* '[n]' - Edit the line at 0-based index idx (called from main loop). */
-    void edit_line(int idx)
-    {
-        if (idx < 0 || idx >= current_lines) {
-            std::cout << "Error: Invalid line number.\n";
-            return;
-        }
-
         print_line(idx);
         std::cout << (idx + 1) << ":*";
-
-        char input[LINE_LENGTH];
-        if (std::fgets(input, LINE_LENGTH, stdin)) {
+        char input[4096];
+        if (std::fgets(input, sizeof(input), stdin)) {
             sanitize_ascii(input);
-            
-        input[std::strcspn(input, "\n")] = '\0';
+            input[std::strcspn(input, "\n")] = '\0';
             if (std::strlen(input) > 0) {
-                safe_copy(buf(idx), input);
+                text_buffer[static_cast<size_t>(idx)] = input;
+                current_lang = SyntaxHighlighter::detect_language(current_filename.c_str(), text_buffer);
             }
         }
     }
 
-    /* 'p' - Display the next N lines (dynamic terminal height); wraps to the top when done. */
-    void page_display()
-    {
-        if (current_lines == 0) {
-            std::cout << "Buffer is empty.\n";
+    void delete_line(int idx) {
+        if (idx < 0 || idx >= (int)text_buffer.size()) {
+            std::cout << "Error: Invalid line number.\n";
             return;
         }
-        int page_len = cfg::get_terminal_height() - 1;
-        if (page_len < 1) page_len = PAGE_LENGTH;
+        text_buffer.erase(text_buffer.begin() + idx);
+    }
 
-        if (current_page >= current_lines) {
+    void delete_lines(int start, int end) {
+        if (bad_range(start, end)) return;
+        text_buffer.erase(text_buffer.begin() + start, text_buffer.begin() + end + 1);
+    }
+
+    void page_display() {
+        if (text_buffer.empty()) {
+            std::cout << "(empty)\n";
+            return;
+        }
+        int page_len = cfg::get_terminal_height() - 2;
+        if (current_page >= (int)text_buffer.size()) {
             current_page = 0;
         }
-        const int end = std::min(current_page + page_len, current_lines);
+        const int end = std::min(current_page + page_len, (int)text_buffer.size());
         for (int i = current_page; i < end; ++i) {
             print_line(i);
         }
         current_page = end;
     }
 
-    /* 's' - Search a range of lines for a sub-string. */
-    void search_text()
-    {
-        const int start = get_int_prompt("Start line: ") - 1;
-        const int end   = get_int_prompt("End line: ")   - 1;
-
-        char search_str[LINE_LENGTH];
-        get_string_prompt("Search for: ", search_str);
-
-        if (bad_range(start, end) || std::strlen(search_str) == 0) return;
-
-        int found = 0;
+    void search_text(int start, int end, const char* term) const {
+        if (bad_range(start, end)) return;
+        const size_t t_len = std::strlen(term);
+        if (t_len == 0) return;
         for (int i = start; i <= end; ++i) {
-            if (std::strstr(buf(i), search_str)) {
+            if (std::strstr(buf(i), term)) {
                 print_line(i);
-                ++found;
             }
         }
-        std::cout << found << " matches found.\n";
     }
 
-    /* 'r' - Replace first occurrence of a sub-string on each matching line. */
-    void replace_text()
-    {
-        const int start = get_int_prompt("Start line: ") - 1;
-        const int end   = get_int_prompt("End line: ")   - 1;
-
-        char search_str[LINE_LENGTH];
-        char replace_str[LINE_LENGTH];
-        get_string_prompt("Search for: ",    search_str);
-        get_string_prompt("Replace with: ",  replace_str);
-
-        if (bad_range(start, end) || std::strlen(search_str) == 0) return;
-
-        int replaced = 0;
+    void replace_text(int start, int end, const char* old_term, const char* new_term) {
+        if (bad_range(start, end)) return;
+        const size_t o_len = std::strlen(old_term);
+        if (o_len == 0) return;
         for (int i = start; i <= end; ++i) {
-            char *pos = std::strstr(buf(i), search_str);
-            if (!pos) continue;
-
-            char temp[LINE_LENGTH];
-            const int prefix_len = static_cast<int>(pos - buf(i));
-
-            std::strncpy(temp, buf(i), static_cast<size_t>(prefix_len));
-            temp[prefix_len] = '\0';
-            std::strncat(temp, replace_str,
-                         LINE_LENGTH - std::strlen(temp) - 1);
-            std::strncat(temp, pos + std::strlen(search_str),
-                         LINE_LENGTH - std::strlen(temp) - 1);
-
-            safe_copy(buf(i), temp);
-            print_line(i);
-            ++replaced;
+            size_t pos = text_buffer[static_cast<size_t>(i)].find(old_term);
+            if (pos != std::string::npos) {
+                text_buffer[static_cast<size_t>(i)].replace(pos, o_len, new_term);
+                print_line(i);
+            }
         }
-        std::cout << replaced << " lines updated.\n";
     }
 
-    /* 't' - Transfer (merge) an external file before a given line. */
-    void transfer_file()
-    {
-        int dest = get_int_prompt("Insert before line: ") - 1;
-        if (dest < 0)               dest = 0;
-        if (dest > current_lines)   dest = current_lines;
-
-        char filename[LINE_LENGTH];
-        get_string_prompt("Filename: ", filename);
-
-        FILE *f = std::fopen(filename, "r");
+    void transfer_file(const char* filename, int dest) {
+        if (dest < 0) dest = 0;
+        if (dest > (int)text_buffer.size()) dest = static_cast<int>(text_buffer.size());
+        FILE* f = std::fopen(filename, "r");
         if (!f) {
-            std::cout << "Error: Cannot open " << filename << "\n";
+            std::cout << "Error reading file.\n";
             return;
         }
-
-        char input[LINE_LENGTH];
-        while (current_lines < MAX_LINES &&
-               std::fgets(input, LINE_LENGTH, f)) {
-            
-        
-        input[std::strcspn(input, "\n")] = '\0';
-
-            /* Shift everything from dest downward to open a slot. */
-            for (int i = current_lines; i > dest; --i) {
-                safe_copy(buf(i), buf(i - 1));
-            }
-            safe_copy(buf(dest), input);
-            ++current_lines;
-            ++dest;
+        char input[4096];
+        std::vector<std::string> temp;
+        while (std::fgets(input, sizeof(input), f)) {
+            sanitize_ascii(input);
+            size_t len = std::strlen(input);
+            if (len && input[len - 1] == '\n') input[len - 1] = '\0';
+            temp.emplace_back(input);
         }
         std::fclose(f);
-        std::cout << "File transferred.\n";
+        text_buffer.insert(text_buffer.begin() + dest, temp.begin(), temp.end());
     }
 
-    /* 'w' - Write N lines to disk in append mode, then clear them from memory. */
-    void write_lines()
-    {
-        const int count = get_int_prompt("Number of lines to write: ");
-        if (count <= 0 || count > current_lines) return;
+    void copy_lines(int start, int end, int dest, int count) {
+        if (count <= 0 || text_buffer.empty()) return;
+        if (bad_range(start, end)) return;
+        
+        if (dest < 0) dest = 0;
+        if (dest > (int)text_buffer.size()) dest = static_cast<int>(text_buffer.size());
+        
+        std::vector<std::string> temp(text_buffer.begin() + start, text_buffer.begin() + end + 1);
+        for (int i = 0; i < count; ++i) {
+            text_buffer.insert(text_buffer.begin() + dest, temp.begin(), temp.end());
+            dest += static_cast<int>(temp.size());
+        }
+    }
 
-        FILE *f = std::fopen(current_filename.data(), "a");
+    void move_lines(int start, int end, int dest) {
+        if (bad_range(start, end)) return;
+        if (dest < 0) dest = 0;
+        if (dest > (int)text_buffer.size()) dest = static_cast<int>(text_buffer.size());
+        
+        if (dest >= start && dest <= end + 1) {
+            std::cout << "Error: Destination within range.\n";
+            return;
+        }
+        
+        std::vector<std::string> temp(text_buffer.begin() + start, text_buffer.begin() + end + 1);
+        text_buffer.erase(text_buffer.begin() + start, text_buffer.begin() + end + 1);
+        
+        if (dest > start) dest -= (end - start + 1);
+        text_buffer.insert(text_buffer.begin() + dest, temp.begin(), temp.end());
+    }
+
+    void write_lines(int count) {
+        if (count <= 0 || text_buffer.empty()) return;
+        if (current_filename.empty()) {
+            std::cout << "No filename specified.\n";
+            return;
+        }
+        if (count > (int)text_buffer.size()) count = static_cast<int>(text_buffer.size());
+        FILE* f = std::fopen(current_filename.c_str(), "a");
         if (!f) {
-            std::cout << "Error: Cannot write to file.\n";
+            std::cout << "Error appending to file.\n";
             return;
         }
         for (int i = 0; i < count; ++i) {
-            std::fprintf(f, "%s\n", buf(i));
+            std::fprintf(f, "%s\n", text_buffer[static_cast<size_t>(i)].c_str());
         }
         std::fclose(f);
-
-        /* Shift remaining lines to the front. */
-        for (int i = count; i < current_lines; ++i) {
-            safe_copy(buf(i - count), buf(i));
-        }
-        current_lines -= count;
-        std::cout << count << " lines written to disk and cleared from memory.\n";
+        text_buffer.erase(text_buffer.begin(), text_buffer.begin() + count);
     }
 
-    /* 'a' - Append from disk the lines not yet in the memory buffer. */
-    void append_lines()
-    {
-        if (current_lines >= MAX_LINES) {
-            std::cout << "Error: Memory buffer is full.\n";
+    void append_lines() {
+        if (current_filename.empty()) {
+            std::cout << "No filename specified.\n";
             return;
         }
-
-        FILE *f = std::fopen(current_filename.data(), "r");
-        if (!f) {
-            std::cout << "Error: Cannot read file.\n";
-            return;
-        }
-
-        /* Skip over lines already loaded into memory. */
-        char input[LINE_LENGTH];
-        for (int skip = current_lines;
-             skip > 0 && std::fgets(input, LINE_LENGTH, f);
-             --skip) {
-            /* discard */
-        }
-
-        int appended = 0;
-        while (current_lines < MAX_LINES &&
-               std::fgets(input, LINE_LENGTH, f)) {
-            
+        FILE* f = std::fopen(current_filename.c_str(), "r");
+        if (!f) return;
         
-        input[std::strcspn(input, "\n")] = '\0';
-            safe_copy(buf(current_lines), input);
-            ++current_lines;
-            ++appended;
+        int skip = static_cast<int>(text_buffer.size());
+        char input[4096];
+        while (skip > 0 && std::fgets(input, sizeof(input), f)) {
+            skip--;
+        }
+        
+        while (std::fgets(input, sizeof(input), f)) {
+            sanitize_ascii(input);
+            size_t len = std::strlen(input);
+            if (len && input[len - 1] == '\n') input[len - 1] = '\0';
+            text_buffer.emplace_back(input);
         }
         std::fclose(f);
-        std::cout << appended << " lines appended from disk.\n";
     }
-
-    /* 'c' - Copy a range of lines to a destination index. */
-    void copy_lines()
-    {
-        const int start = get_int_prompt("Start line: ")       - 1;
-        const int end   = get_int_prompt("End line: ")         - 1;
-        const int dest  = get_int_prompt("Destination line: ") - 1;
-
-        if (bad_range(start, end) || dest < 0 || dest > current_lines) return;
-
-        if (dest >= start && dest <= end) {
-            std::cout << "Error: Cannot copy into source range.\n";
-            return;
-        }
-
-        const int count = end - start + 1;
-        if (current_lines + count > MAX_LINES) {
-            std::cout << "Error: Memory limit reached.\n";
-            return;
-        }
-
-        /* Open a gap of 'count' slots at dest. */
-        for (int i = current_lines - 1; i >= dest; --i) {
-            safe_copy(buf(i + count), buf(i));
-        }
-
-        /* Fill the gap from the source (which shifted if dest < start). */
-        if (dest < start) {
-            for (int j = 0; j < count; ++j) {
-                safe_copy(buf(dest + j), buf(start + count + j));
-            }
-        } else {
-            for (int j = 0; j < count; ++j) {
-                safe_copy(buf(dest + j), buf(start + j));
-            }
-        }
-
-        current_lines += count;
-        std::cout << count << " lines copied.\n";
-    }
-
-    /* 'm' - Move a range of lines to a destination index. */
-    void move_lines()
-    {
-        const int start = get_int_prompt("Start line: ")       - 1;
-        const int end   = get_int_prompt("End line: ")         - 1;
-        const int dest  = get_int_prompt("Destination line: ") - 1;
-
-        if (bad_range(start, end) || dest < 0 || dest > current_lines) return;
-
-        if (dest >= start && dest <= end) {
-            std::cout << "Error: Cannot move into source range.\n";
-            return;
-        }
-
-        const int count = end - start + 1;
-
-        /* Temporarily open a gap at dest (same as copy). */
-        for (int i = current_lines - 1; i >= dest; --i) {
-            safe_copy(buf(i + count), buf(i));
-        }
-
-        /* Copy source into the gap; calculate where originals now live. */
-        int del_start = start;
-        if (dest < start) {
-            for (int j = 0; j < count; ++j) {
-                safe_copy(buf(dest + j), buf(start + count + j));
-            }
-            del_start = start + count;
-        } else {
-            for (int j = 0; j < count; ++j) {
-                safe_copy(buf(dest + j), buf(start + j));
-            }
-        }
-
-        /* Close the gap left by the original lines. */
-        for (int i = del_start; i < current_lines - count; ++i) {
-            safe_copy(buf(i), buf(i + count));
-        }
-        /* Note: total line count is unchanged by a move. */
-        std::cout << count << " lines moved.\n";
-    }
-
-    /* Main command loop */
 
     void run()
     {
@@ -983,52 +799,86 @@ public:
         while (true) {
             std::cout << "*";
             if (!std::fgets(cmd, LINE_LENGTH, stdin)) break;
-            sanitize_ascii(cmd);
+            
+            // sanitize_ascii inside loop
+            if (cmd[0] == '\0') continue;
+            char* p = cmd;
+            char* str = cmd;
+            while (*str) {
+                if (static_cast<unsigned char>(*str) < 128) {
+                    *p++ = *str;
+                }
+                str++;
+            }
+            *p = '\0';
+            
             cmd[std::strcspn(cmd, "\n")] = '\0';
 
             const unsigned char first =
                 static_cast<unsigned char>(cmd[0]);
 
             if (std::isdigit(first)) {
-                
-        
-        edit_line(std::atoi(cmd) - 1);
+                edit_line(std::atoi(cmd) - 1);
             } else if (first == 'a' || first == 'A') {
                 append_lines();
             } else if (first == 'c' || first == 'C') {
-                copy_lines();
+                int dest = get_int_prompt("Destination: ");
+                int count = get_int_prompt("Count: ");
+                if (count > 0) {
+                    int start = get_int_prompt("Start line: ") - 1;
+                    int end = get_int_prompt("End line: ") - 1;
+                    copy_lines(start, end, dest - 1, count);
+                }
             } else if (first == 'd' || first == 'D') {
-                delete_line();
+                int start = get_int_prompt("Start line: ") - 1;
+                int end = get_int_prompt("End line: ") - 1;
+                delete_lines(start, end);
             } else if (first == 'e' || first == 'E') {
                 save_file();
                 break;
             } else if (first == 'h' || first == 'H' || first == '?') {
                 display_help();
             } else if (first == 'i' || first == 'I') {
-                insert_line();
+                insert_lines();
             } else if (first == 'l' || first == 'L') {
-                list_lines();
+                int start = get_int_prompt("Start line: ") - 1;
+                int end = get_int_prompt("End line: ") - 1;
+                list_lines(start, end);
             } else if (first == 'm' || first == 'M') {
-                move_lines();
+                int start = get_int_prompt("Start line: ") - 1;
+                int end = get_int_prompt("End line: ") - 1;
+                int dest = get_int_prompt("Destination: ");
+                move_lines(start, end, dest - 1);
             } else if (first == 'p' || first == 'P') {
                 page_display();
             } else if (first == 'q' || first == 'Q') {
                 break;
             } else if (first == 'r' || first == 'R') {
-                replace_text();
+                int start = get_int_prompt("Start line: ") - 1;
+                int end = get_int_prompt("End line: ") - 1;
+                char old_t[LINE_LENGTH]; get_string_prompt("Old text: ", old_t);
+                char new_t[LINE_LENGTH]; get_string_prompt("New text: ", new_t);
+                replace_text(start, end, old_t, new_t);
             } else if (first == 's' || first == 'S') {
-                search_text();
+                int start = get_int_prompt("Start line: ") - 1;
+                int end = get_int_prompt("End line: ") - 1;
+                char old_t[LINE_LENGTH]; get_string_prompt("Search text: ", old_t);
+                search_text(start, end, old_t);
             } else if (first == 't' || first == 'T') {
-                transfer_file();
+                char fn[LINE_LENGTH]; get_string_prompt("Filename: ", fn);
+                int dest = get_int_prompt("Destination: ");
+                transfer_file(fn, dest - 1);
             } else if (first == 'w' || first == 'W') {
-                write_lines();
+                int count = get_int_prompt("Number of lines: ");
+                write_lines(count);
             } else if (std::strlen(cmd) > 0) {
                 std::cout << "Entry error (type '?' for help)\n";
             }
         }
     }
-
 }; /* class EdlinEditor */
+
+
 
 /* 
  *  SECTION 4 - CLI Flag Handlers

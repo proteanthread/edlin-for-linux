@@ -1,6 +1,6 @@
 /*
  *
- * VERSION: 3.0.0
+ * VERSION: 3.1.0
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
  *
@@ -18,6 +18,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
+
+#if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)
+    #include <poll.h>
+#endif
 
 /* Filter to ensure strictly 7-bit ASCII */
 static void sanitize_ascii(char* str) {
@@ -51,8 +56,6 @@ static void sanitize_ascii(char* str) {
     struct termios orig_termios;
 #endif
 
-#define MAX_VI_LINES 1000
-#define MAX_VI_LENGTH 255
 
 /* --- Extended Key Codes --- */
 #define KEY_UP    1000
@@ -79,12 +82,70 @@ static void sanitize_ascii(char* str) {
 #define KEY_F4    1014
 #define KEY_F5    1015
 #define KEY_F10   1020
-
-char text_buffer[MAX_VI_LINES][MAX_VI_LENGTH];
-char current_filename[MAX_VI_LENGTH] = "";
-char cmd_buffer[MAX_VI_LENGTH] = "";
+#define KEY_TIMEOUT 1021
+#define KEY_CTRL_HOME 1022
+#define KEY_CTRL_END  1023
 
 int current_lines = 0;
+typedef struct {
+    char *text;
+    size_t length;
+    size_t capacity;
+} Line;
+Line *text_buffer = NULL;
+int text_buffer_capacity = 0;
+char current_filename[4096] = "";
+char cmd_buffer[4096] = "";
+
+static void oom(void) {
+    fprintf(stderr, "\n\nOut of memory!\n");
+    exit(1);
+}
+
+static void ensure_line_capacity(int row, size_t needed) {
+    if (needed > text_buffer[row].capacity) {
+        size_t new_cap = text_buffer[row].capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 128) new_cap = 128;
+        char *new_text = realloc(text_buffer[row].text, new_cap);
+        if (!new_text) oom();
+        text_buffer[row].text = new_text;
+        text_buffer[row].capacity = new_cap;
+    }
+}
+
+static void ensure_buffer_capacity(int needed) {
+    if (needed > text_buffer_capacity) {
+        int new_cap = text_buffer_capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 256) new_cap = 256;
+        Line *new_buf = realloc(text_buffer, new_cap * sizeof(Line));
+        if (!new_buf) oom();
+        text_buffer = new_buf;
+        text_buffer_capacity = new_cap;
+    }
+}
+
+static void insert_empty_line(int row) {
+    ensure_buffer_capacity(current_lines + 1);
+    for (int i = current_lines; i > row; i--) {
+        text_buffer[i] = text_buffer[i - 1];
+    }
+    text_buffer[row].text = malloc(128);
+    if (!text_buffer[row].text) oom();
+    text_buffer[row].text[0] = '\0';
+    text_buffer[row].length = 0;
+    text_buffer[row].capacity = 128;
+    current_lines++;
+}
+
+static void free_line(int row) {
+    if (text_buffer[row].text) {
+        free(text_buffer[row].text);
+        text_buffer[row].text = NULL;
+    }
+}
+
 int cursor_r = 0, cursor_c = 0;
 int row_offset = 0;
 int mode = 0; /* 0: Normal, 1: Insert, 2: Command */
@@ -103,6 +164,15 @@ static const char *bright_colors[] = {
 #define NUM_BRIGHT_COLORS (sizeof(bright_colors)/sizeof(bright_colors[0]))
 static int color_index = 0;
 static int pushed_char = -1;
+int screen_cols = 80;
+
+#if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)
+struct termios orig_termios;
+#else
+HANDLE hOut;
+DWORD dwMode;
+#endif
+
 static bool sel_active = false;
 static int sel_start_r = 0, sel_start_c = 0;
 static int sel_end_r = 0, sel_end_c = 0;
@@ -112,20 +182,23 @@ void get_terminal_size(void) {
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
         screen_rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+        screen_cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
     } else {
-        screen_rows = 24;
+        screen_rows = 24; screen_cols = 80;
     }
 #elif defined(__MSDOS__) || defined(__DOS__)
-    screen_rows = 25; /* DOS text-mode standard */
+    screen_rows = 25; screen_cols = 80; /* DOS text-mode standard */
 #else
     struct winsize w;
-    if (ioctl(1, TIOCGWINSZ, &w) != -1 && w.ws_row > 0) {
+    if (ioctl(1, TIOCGWINSZ, &w) != -1 && w.ws_row > 0 && w.ws_col > 0) {
         screen_rows = w.ws_row;
+        screen_cols = w.ws_col;
     } else {
-        screen_rows = 24;
+        screen_rows = 24; screen_cols = 80;
     }
 #endif
     if (screen_rows < 5) screen_rows = 24;
+    if (screen_cols < 20) screen_cols = 80;
 }
 
 void reset_term(void) {
@@ -136,8 +209,8 @@ void reset_term(void) {
 
 void init_term(void) {
 #if defined(_WIN32) || defined(WIN32)
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD dwMode = 0;
+    hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    dwMode = 0;
     GetConsoleMode(hOut, &dwMode);
     SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #elif !defined(__MSDOS__) && !defined(__DOS__)
@@ -169,8 +242,17 @@ int get_input(void) {
         return c;
     }
 
-#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+#if defined(_WIN32) || defined(WIN32)
+    DWORD start = GetTickCount();
+    while (!_kbhit()) {
+        if (GetTickCount() - start > 1000) return KEY_TIMEOUT;
+        Sleep(50);
+    }
     int c = GETCH();
+#elif defined(__MSDOS__) || defined(__DOS__)
+    int c = GETCH();
+#endif
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
     if (c < 0) {
         running = false; 
         return 0;
@@ -188,13 +270,20 @@ int get_input(void) {
             case 81: return KEY_PGDN;
             case 82: return KEY_INS;
             case 83: return KEY_DEL;
+            case 119: return KEY_CTRL_HOME;
+            case 117: return KEY_CTRL_END;
         }
         return 0;
     }
     return c;
 #else
     char c, seq1, seq2, seq3;
-    if (read(0, &c, 1) != 1) {
+    struct pollfd pfd;
+    pfd.fd = 0;
+    pfd.events = POLLIN;
+    int ret = poll(&pfd, 1, 1000);
+    if (ret == 0) return KEY_TIMEOUT;
+    if (ret < 0 || read(0, &c, 1) != 1) {
         running = false;
         return 0;
     }
@@ -212,9 +301,7 @@ int get_input(void) {
                     if (seq1 == '[' && seq2 >= '0' && seq2 <= '9') {
                         if (read(0, &seq3, 1) == 1) {
                             if (seq3 == '~') {
-                                tcsetattr(0, TCSANOW, &orig_termios);
-                                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0;
-                                tcsetattr(0, TCSANOW, &raw);
+                                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                                 switch(seq2) {
                                     case '1': return KEY_HOME;
                                     case '2': return KEY_INS;
@@ -224,6 +311,15 @@ int get_input(void) {
                                     case '6': return KEY_PGDN;
                                     case '7': return KEY_HOME;
                                     case '8': return KEY_END;
+                                }
+                            } else if (seq3 == ';') {
+                                char seq4, seq5;
+                                if (read(0, &seq4, 1) == 1 && read(0, &seq5, 1) == 1) {
+                                    if (seq4 == '5') {
+                                        raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
+                                        if (seq5 == 'H') return KEY_CTRL_HOME;
+                                        if (seq5 == 'F') return KEY_CTRL_END;
+                                    }
                                 }
                             } else if (seq2 == '1') {
                                 if (seq3 >= '1' && seq3 <= '5') {
@@ -254,6 +350,10 @@ int get_input(void) {
                             }
                         } else if (seq1 == 'O') {
                             switch(seq2) {
+                                case 'A': return KEY_UP;
+                                case 'B': return KEY_DOWN;
+                                case 'C': return KEY_RIGHT;
+                                case 'D': return KEY_LEFT;
                                 case 'H': return KEY_HOME;
                                 case 'F': return KEY_END;
                             }
@@ -274,34 +374,38 @@ int get_input(void) {
 }
 
 void load_file(const char *filename) {
-    FILE *file = fopen(filename, "r");
+    if (text_buffer) {
+        for (int i = 0; i < current_lines; i++) free_line(i);
+    }
     current_lines = 0;
+    ensure_buffer_capacity(1);
+    FILE *file = fopen(filename, "r");
     if (file) {
-        while (current_lines < MAX_VI_LINES && fgets(text_buffer[current_lines], MAX_VI_LENGTH, file)) {
-            sanitize_ascii(text_buffer[current_lines]);
-            
-        int len = (int)strlen(text_buffer[current_lines]);
-            while (len > 0 && (text_buffer[current_lines][len - 1] == '\n' || text_buffer[current_lines][len - 1] == '\r')) {
-                text_buffer[current_lines][len - 1] = '\0';
+        char line_buf[4096];
+        while (fgets(line_buf, sizeof(line_buf), file)) {
+            sanitize_ascii(line_buf);
+            int len = (int)strlen(line_buf);
+            while (len > 0 && (line_buf[len - 1] == '\n' || line_buf[len - 1] == '\r')) {
+                line_buf[len - 1] = '\0';
                 len--;
             }
-            current_lines++;
+            insert_empty_line(current_lines);
+            ensure_line_capacity(current_lines - 1, len + 1);
+            strcpy(text_buffer[current_lines - 1].text, line_buf);
+            text_buffer[current_lines - 1].length = len;
         }
         fclose(file);
     }
-    if (current_lines == 0) {
-        text_buffer[0][0] = '\0';
-        current_lines = 1;
-    }
-    strncpy(current_filename, filename, MAX_VI_LENGTH - 1);
-    current_filename[MAX_VI_LENGTH - 1] = '\0';
+    if (current_lines == 0) insert_empty_line(0);
+    strncpy(current_filename, filename, 4095);
+    current_filename[4095] = '\0';
 }
 
 void save_file(void) {
     FILE *file = fopen(current_filename, "w");
     if (file) {
         for (int i = 0; i < current_lines; i++) {
-            fprintf(file, "%s\n", text_buffer[i]);
+            fprintf(file, "%s\n", text_buffer[i].text);
         }
         fclose(file);
     }
@@ -312,7 +416,7 @@ void fix_cursor(void) {
     if (cursor_r < 0) cursor_r = 0;
     if (cursor_r >= current_lines) cursor_r = current_lines - 1;
 
-    len = (int)strlen(text_buffer[cursor_r]);
+    len = text_buffer[cursor_r].length;
     if (mode == 0) {
         if (cursor_c >= len && len > 0) cursor_c = len - 1;
     } else {
@@ -322,6 +426,58 @@ void fix_cursor(void) {
 
     if (cursor_r < row_offset) row_offset = cursor_r;
     if (cursor_r >= row_offset + screen_rows - 1) row_offset = cursor_r - (screen_rows - 2);
+}
+
+static void format_filename_for_status(char *out_buf, const char *in_filename, int max_len) {
+    if (!in_filename || !in_filename[0]) {
+        strcpy(out_buf, "NEW");
+        return;
+    }
+    char abs_path[4096];
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+    if (_fullpath(abs_path, in_filename, 4096) == NULL) {
+        strcpy(abs_path, in_filename);
+    }
+#else
+    if (realpath(in_filename, abs_path) == NULL) {
+        strcpy(abs_path, in_filename);
+    }
+#endif
+
+    int len = (int)strlen(abs_path);
+    if (len <= max_len) {
+        strcpy(out_buf, abs_path);
+        return;
+    }
+    
+    /* Find base filename */
+    const char *base = abs_path;
+    for (int i = len - 1; i >= 0; i--) {
+        if (abs_path[i] == '/' || abs_path[i] == '\\') {
+            base = &abs_path[i + 1];
+            break;
+        }
+    }
+    
+    int base_len = (int)strlen(base);
+    if (base_len >= max_len) {
+        /* Extreme edge case: fallback to base filename */
+        strcpy(out_buf, base);
+        return;
+    }
+    
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+    const char *prefix = "C:\\...\\";
+#else
+    const char *prefix = "/.../";
+#endif
+
+    int prefix_len = (int)strlen(prefix);
+    if (prefix_len + base_len <= max_len) {
+        sprintf(out_buf, "%s%s", prefix, base);
+    } else {
+        strcpy(out_buf, base);
+    }
 }
 
 void render_screen(void) {
@@ -334,7 +490,7 @@ void render_screen(void) {
         int line_idx = row_offset + i;
         if (line_idx < current_lines) {
             printf("%s", bright_colors[color_index]);
-            for (int j = 0; j < (int)strlen(text_buffer[line_idx]); j++) {
+            for (int j = 0; j < (int)text_buffer[line_idx].length; j++) {
                 int in_sel = 0;
                 if (sel_active) {
                     int r1, c1, r2, c2;
@@ -345,9 +501,9 @@ void render_screen(void) {
                     else if (line_idx == r2 && line_idx > r1 && j < c2) in_sel = 1;
                 }
                 if (in_sel) {
-                    printf("\x1b[47;30m%c%s", text_buffer[line_idx][j], bright_colors[color_index]);
+                    printf("\x1b[47;30m%c%s", text_buffer[line_idx].text[j], bright_colors[color_index]);
                 } else {
-                    printf("%c", text_buffer[line_idx][j]);
+                    printf("%c", text_buffer[line_idx].text[j]);
                 }
             }
             printf("\x1b[K\r\n");
@@ -358,13 +514,33 @@ void render_screen(void) {
     
     /* Dynamic Status Line */
     printf("\x1b[47;30m");
+    char left_status[4200];
     if (mode == 2) {
-        printf(":%s\x1b[K", cmd_buffer);
+        snprintf(left_status, sizeof(left_status), ":%s", cmd_buffer);
     } else if (mode == 1) {
-        printf("-- INSERT --\x1b[K");
+        snprintf(left_status, sizeof(left_status), "-- INSERT --");
     } else {
-        printf("\"%s\" %d:%d\x1b[K", current_filename[0] ? current_filename : "NEW", cursor_r + 1, current_lines);
+        char trunc_name[4096];
+        format_filename_for_status(trunc_name, current_filename, screen_cols - 30);
+        snprintf(left_status, sizeof(left_status), "\"%s\" %d:%d", trunc_name, cursor_r + 1, current_lines);
     }
+    
+    time_t rawtime;
+    struct tm *timeinfo;
+    char time_str[64];
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", timeinfo);
+    
+    int ll = (int)strlen(left_status);
+    int tl = (int)strlen(time_str);
+    int pad = screen_cols - ll - tl - 2;
+    if (pad < 1) pad = 1;
+    
+    printf("\x1b[%d;1H\x1b[47;30m\x1b[K", screen_rows);
+    printf("%s", left_status);
+    for (int i = 0; i < pad; i++) printf(" ");
+    printf("%s", time_str);
     printf("\x1b[0m");
     
     /* Set Physical Cursor Position */
@@ -413,13 +589,15 @@ void handle_normal(int c) {
         pending_d = 0;
         if (c == 'd') {
             if (current_lines > 1) {
+                free_line(cursor_r);
                 for (int i = cursor_r; i < current_lines - 1; i++) {
-                    strcpy(text_buffer[i], text_buffer[i + 1]);
+                    text_buffer[i] = text_buffer[i + 1];
                 }
                 current_lines--;
                 if (cursor_r >= current_lines) cursor_r = current_lines - 1;
             } else {
-                text_buffer[0][0] = '\0';
+                text_buffer[0].text[0] = '\0';
+                text_buffer[0].length = 0;
                 cursor_c = 0;
             }
             return;
@@ -432,46 +610,37 @@ void handle_normal(int c) {
         case 'j': case KEY_DOWN:  cursor_r++; break;
         case 'k': case KEY_UP:    cursor_r--; break;
         case KEY_HOME: case '0':  cursor_c = 0; break;
-        case KEY_END:  case '$':  cursor_c = (int)strlen(text_buffer[cursor_r]); break;
+        case KEY_END:  case '$':  cursor_c = (int)text_buffer[cursor_r].length; break;
         case KEY_PGUP: cursor_r -= (screen_rows - 2); break;
         case KEY_PGDN: cursor_r += (screen_rows - 2); break;
+        case KEY_CTRL_HOME: cursor_r = 0; cursor_c = 0; break;
+        case KEY_CTRL_END: cursor_r = current_lines - 1; cursor_c = (int)text_buffer[cursor_r].length; break;
         
         case 'i': case KEY_INS: mode = 1; break;
         case 'a': cursor_c++; mode = 1; break;
         case 'I': cursor_c = 0; mode = 1; break;
-        case 'A': cursor_c = (int)strlen(text_buffer[cursor_r]); mode = 1; break;
+        case 'A': cursor_c = (int)text_buffer[cursor_r].length; mode = 1; break;
         
         case 'x': case KEY_DEL:
-            if (text_buffer[cursor_r][cursor_c] != '\0') {
-                for (int i = cursor_c; text_buffer[cursor_r][i]; i++) {
-                    text_buffer[cursor_r][i] = text_buffer[cursor_r][i + 1];
+            if (text_buffer[cursor_r].text[cursor_c] != '\0') {
+                for (int i = cursor_c; text_buffer[cursor_r].text[i]; i++) {
+                    text_buffer[cursor_r].text[i] = text_buffer[cursor_r].text[i + 1];
                 }
+                text_buffer[cursor_r].length--;
             }
             break;
             
         case 'd': pending_d = 1; break;
         case 'o':
-            if (current_lines < MAX_VI_LINES) {
-                for (int i = current_lines; i > cursor_r + 1; i--) {
-                    strcpy(text_buffer[i], text_buffer[i - 1]);
-                }
-                cursor_r++;
-                text_buffer[cursor_r][0] = '\0';
-                current_lines++;
-                mode = 1;
-                cursor_c = 0;
-            }
+            insert_empty_line(cursor_r + 1);
+            cursor_r++;
+            mode = 1;
+            cursor_c = 0;
             break;
         case 'O':
-            if (current_lines < MAX_VI_LINES) {
-                for (int i = current_lines; i > cursor_r; i--) {
-                    strcpy(text_buffer[i], text_buffer[i - 1]);
-                }
-                text_buffer[cursor_r][0] = '\0';
-                current_lines++;
-                mode = 1;
-                cursor_c = 0;
-            }
+            insert_empty_line(cursor_r);
+            mode = 1;
+            cursor_c = 0;
             break;
             
         case ':':
@@ -491,63 +660,70 @@ void handle_insert(int c) {
     else if (c == KEY_LEFT) { cursor_c--; }
     else if (c == KEY_RIGHT) { cursor_c++; }
     else if (c == KEY_HOME) { cursor_c = 0; }
-    else if (c == KEY_END) { cursor_c = (int)strlen(text_buffer[cursor_r]); }
+    else if (c == KEY_END) { cursor_c = (int)text_buffer[cursor_r].length; }
     else if (c == KEY_PGUP) { cursor_r -= (screen_rows - 2); }
     else if (c == KEY_PGDN) { cursor_r += (screen_rows - 2); }
+    else if (c == KEY_CTRL_HOME) { cursor_r = 0; cursor_c = 0; }
+    else if (c == KEY_CTRL_END) { cursor_r = current_lines - 1; cursor_c = (int)text_buffer[cursor_r].length; }
     else if (c == KEY_DEL) {
-        if (text_buffer[cursor_r][cursor_c] != '\0') {
-            for (int i = cursor_c; text_buffer[cursor_r][i]; i++) {
-                text_buffer[cursor_r][i] = text_buffer[cursor_r][i + 1];
+        if (text_buffer[cursor_r].text[cursor_c] != '\0') {
+            for (int i = cursor_c; text_buffer[cursor_r].text[i]; i++) {
+                text_buffer[cursor_r].text[i] = text_buffer[cursor_r].text[i + 1];
             }
+            text_buffer[cursor_r].length--;
         } else if (cursor_r < current_lines - 1) {
-            int len = (int)strlen(text_buffer[cursor_r]);
-            if (len + (int)strlen(text_buffer[cursor_r + 1]) < MAX_VI_LENGTH) {
-                memmove(&text_buffer[cursor_r][len], text_buffer[cursor_r + 1], strlen(text_buffer[cursor_r + 1]) + 1);
-                for (int i = cursor_r + 1; i < current_lines - 1; i++) {
-                    memmove(text_buffer[i], text_buffer[i + 1], strlen(text_buffer[i + 1]) + 1);
-                }
-                current_lines--;
+            int len = text_buffer[cursor_r].length;
+            int next_len = text_buffer[cursor_r + 1].length;
+            ensure_line_capacity(cursor_r, len + next_len + 1);
+            memmove(&text_buffer[cursor_r].text[len], text_buffer[cursor_r + 1].text, next_len + 1);
+            text_buffer[cursor_r].length += next_len;
+            free_line(cursor_r + 1);
+            for (int i = cursor_r + 1; i < current_lines - 1; i++) {
+                text_buffer[i] = text_buffer[i + 1];
             }
+            current_lines--;
         }
     } else if (c == 10 || c == 13) { /* Enter */
-        if (current_lines < MAX_VI_LINES) {
-            for (int i = current_lines; i > cursor_r; i--) {
-                memmove(text_buffer[i], text_buffer[i - 1], strlen(text_buffer[i - 1]) + 1);
-            }
-            memmove(text_buffer[cursor_r + 1], &text_buffer[cursor_r][cursor_c], strlen(&text_buffer[cursor_r][cursor_c]) + 1);
-            text_buffer[cursor_r][cursor_c] = '\0';
-            current_lines++;
-            cursor_r++;
-            cursor_c = 0;
-        }
+        insert_empty_line(cursor_r + 1);
+        int rem_len = text_buffer[cursor_r].length - cursor_c;
+        ensure_line_capacity(cursor_r + 1, rem_len + 1);
+        memmove(text_buffer[cursor_r + 1].text, &text_buffer[cursor_r].text[cursor_c], rem_len + 1);
+        text_buffer[cursor_r + 1].length = rem_len;
+        text_buffer[cursor_r].text[cursor_c] = '\0';
+        text_buffer[cursor_r].length = cursor_c;
+        cursor_r++;
+        cursor_c = 0;
     } else if (c == 8 || c == 127) { /* Backspace */
         if (cursor_c > 0) {
-            int len = (int)strlen(text_buffer[cursor_r]);
+            int len = text_buffer[cursor_r].length;
             for (int i = cursor_c; i <= len; i++) {
-                text_buffer[cursor_r][i - 1] = text_buffer[cursor_r][i];
+                text_buffer[cursor_r].text[i - 1] = text_buffer[cursor_r].text[i];
             }
+            text_buffer[cursor_r].length--;
             cursor_c--;
         } else if (cursor_r > 0) {
-            int prev_len = (int)strlen(text_buffer[cursor_r - 1]);
-            if (prev_len + (int)strlen(text_buffer[cursor_r]) < MAX_VI_LENGTH) {
-                strcat(text_buffer[cursor_r - 1], text_buffer[cursor_r]);
-                for (int i = cursor_r; i < current_lines - 1; i++) {
-                    strcpy(text_buffer[i], text_buffer[i + 1]);
-                }
-                current_lines--;
-                cursor_r--;
-                cursor_c = prev_len;
+            int prev_len = text_buffer[cursor_r - 1].length;
+            int cur_len = text_buffer[cursor_r].length;
+            ensure_line_capacity(cursor_r - 1, prev_len + cur_len + 1);
+            strcat(text_buffer[cursor_r - 1].text, text_buffer[cursor_r].text);
+            text_buffer[cursor_r - 1].length += cur_len;
+            free_line(cursor_r);
+            for (int i = cursor_r; i < current_lines - 1; i++) {
+                text_buffer[i] = text_buffer[i + 1];
             }
+            current_lines--;
+            cursor_r--;
+            cursor_c = prev_len;
         }
     } else if (c >= 32 && c <= 126) { /* Standard ASCII Characters */
-        int len = (int)strlen(text_buffer[cursor_r]);
-        if (len < MAX_VI_LENGTH - 1) {
-            for (int i = len; i >= cursor_c; i--) {
-                text_buffer[cursor_r][i + 1] = text_buffer[cursor_r][i];
-            }
-            text_buffer[cursor_r][cursor_c] = (char)c;
-            cursor_c++;
+        int len = text_buffer[cursor_r].length;
+        ensure_line_capacity(cursor_r, len + 2);
+        for (int i = len; i >= cursor_c; i--) {
+            text_buffer[cursor_r].text[i + 1] = text_buffer[cursor_r].text[i];
         }
+        text_buffer[cursor_r].text[cursor_c] = (char)c;
+        text_buffer[cursor_r].length++;
+        cursor_c++;
     } else if (c == KEY_F1) {
         display_help();
     } else if (c == KEY_F2) {
@@ -572,9 +748,9 @@ void handle_command(int c) {
     } else if (c == 10 || c == 13) {
         if (strcmp(cmd_buffer, "w") == 0) save_file();
         else if (strncmp(cmd_buffer, "w ", 2) == 0) {
-            char new_file[MAX_VI_LENGTH];
-            strncpy(new_file, cmd_buffer + 2, MAX_VI_LENGTH - 1);
-            new_file[MAX_VI_LENGTH - 1] = '\0';
+            char new_file[4096];
+            strncpy(new_file, cmd_buffer + 2, 4096 - 1);
+            new_file[4096 - 1] = '\0';
             strcpy(current_filename, new_file);
             save_file();
         }
@@ -584,9 +760,9 @@ void handle_command(int c) {
             running = false;
         }
         else if (strncmp(cmd_buffer, "load ", 5) == 0) {
-            char new_file[MAX_VI_LENGTH];
-            strncpy(new_file, cmd_buffer + 5, MAX_VI_LENGTH - 1);
-            new_file[MAX_VI_LENGTH - 1] = '\0';
+            char new_file[4096];
+            strncpy(new_file, cmd_buffer + 5, 4096 - 1);
+            new_file[4096 - 1] = '\0';
             strcpy(current_filename, new_file);
             load_file(current_filename);
         }
@@ -594,9 +770,9 @@ void handle_command(int c) {
             color_index = (color_index + 1) % NUM_BRIGHT_COLORS;
         }
         else if (strncmp(cmd_buffer, "color ", 6) == 0) {
-            char new_color[MAX_VI_LENGTH];
-            strncpy(new_color, cmd_buffer + 6, MAX_VI_LENGTH - 1);
-            new_color[MAX_VI_LENGTH - 1] = '\0';
+            char new_color[4096];
+            strncpy(new_color, cmd_buffer + 6, 4096 - 1);
+            new_color[4096 - 1] = '\0';
             if (strcmp(new_color, "white") == 0) color_index = 0;
             else if (strcmp(new_color, "cyan") == 0) color_index = 1;
             else if (strcmp(new_color, "green") == 0) color_index = 2;
@@ -609,7 +785,7 @@ void handle_command(int c) {
     } else if (c == 8 || c == 127) {
         if (cmd_len > 0) cmd_buffer[--cmd_len] = '\0';
         else mode = 0;
-    } else if (c >= 32 && c <= 126 && cmd_len < MAX_VI_LENGTH - 1) {
+    } else if (c >= 32 && c <= 126 && cmd_len < 4096 - 1) {
         cmd_buffer[cmd_len++] = (char)c;
         cmd_buffer[cmd_len] = '\0';
     }
@@ -628,7 +804,7 @@ int main(int argc, char *argv[]) {
         load_file(argv[1]);
     } else {
         current_lines = 1;
-        text_buffer[0][0] = '\0';
+        insert_empty_line(0);
     }
     
     init_term();
@@ -640,7 +816,7 @@ int main(int argc, char *argv[]) {
         render_screen();
         
         c = get_input();
-        if (c == 0) continue;
+        if (c == 0 || c == KEY_TIMEOUT) continue;
         
         if (mode == 0) handle_normal(c);
         else if (mode == 1) handle_insert(c);

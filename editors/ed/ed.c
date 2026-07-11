@@ -1,6 +1,6 @@
 /*
  *
- * VERSION: 3.0.0
+ * VERSION: 3.1.0
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
  *
@@ -20,6 +20,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <time.h>
+
+#if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)
+    #include <poll.h>
+#endif
 
 /* Filter to ensure strictly 7-bit ASCII */
 static void sanitize_ascii(char* str) {
@@ -52,8 +57,6 @@ static void sanitize_ascii(char* str) {
     struct termios orig_termios;
 #endif
 
-#define MAX_EDIT_LINES 1000
-#define MAX_EDIT_LENGTH 255
 #define TAB_STOP 4
 
 /* --- ANSI DOS EDIT Themes --- */
@@ -69,6 +72,7 @@ enum editorKey {
     KEY_ENTER = 13,
     KEY_BACKSPACE = 8,
     KEY_TAB = 9,
+    KEY_TIMEOUT = 99,
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -82,15 +86,72 @@ enum editorKey {
     KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F10,
     ALT_F, ALT_E, ALT_S, ALT_D, ALT_H,
     SHIFT_ARROW_UP, SHIFT_ARROW_DOWN, SHIFT_ARROW_LEFT, SHIFT_ARROW_RIGHT,
-    KEY_CTRL_INS, KEY_SHIFT_DEL, KEY_SHIFT_INS
+    KEY_CTRL_INS, KEY_SHIFT_DEL, KEY_SHIFT_INS,
+    CTRL_HOME, CTRL_END
 };
 
 /* --- Global State --- */
-static char text_buffer[MAX_EDIT_LINES][MAX_EDIT_LENGTH];
+typedef struct {
+    char *text;
+    size_t length;
+    size_t capacity;
+} Line;
+static Line *text_buffer = NULL;
+static int text_buffer_capacity = 0;
 static int num_lines = 0;
-static char current_filename[MAX_EDIT_LENGTH] = "";
-static char clipboard_line[MAX_EDIT_LENGTH] = "";
-static char search_term[MAX_EDIT_LENGTH] = "";
+static char current_filename[4096] = "";
+static char clipboard_line[4096] = "";
+static char search_term[4096] = "";
+
+static void oom(void) {
+    fprintf(stderr, "\n\nOut of memory!\n");
+    exit(1);
+}
+
+static void ensure_line_capacity(int row, size_t needed) {
+    if (needed > text_buffer[row].capacity) {
+        size_t new_cap = text_buffer[row].capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 128) new_cap = 128;
+        char *new_text = realloc(text_buffer[row].text, new_cap);
+        if (!new_text) oom();
+        text_buffer[row].text = new_text;
+        text_buffer[row].capacity = new_cap;
+    }
+}
+
+static void ensure_buffer_capacity(int needed) {
+    if (needed > text_buffer_capacity) {
+        int new_cap = text_buffer_capacity * 2;
+        if (new_cap < needed) new_cap = needed;
+        if (new_cap < 256) new_cap = 256;
+        Line *new_buf = realloc(text_buffer, new_cap * sizeof(Line));
+        if (!new_buf) oom();
+        text_buffer = new_buf;
+        text_buffer_capacity = new_cap;
+    }
+}
+
+static void insert_empty_line(int row) {
+    ensure_buffer_capacity(num_lines + 1);
+    for (int i = num_lines; i > row; i--) {
+        text_buffer[i] = text_buffer[i - 1];
+    }
+    text_buffer[row].text = malloc(128);
+    if (!text_buffer[row].text) oom();
+    text_buffer[row].text[0] = '\0';
+    text_buffer[row].length = 0;
+    text_buffer[row].capacity = 128;
+    num_lines++;
+}
+
+static void free_line(int row) {
+    if (text_buffer[row].text) {
+        free(text_buffer[row].text);
+        text_buffer[row].text = NULL;
+    }
+}
+
 
 static int cx = 0, cy = 0;
 static bool sel_active = false;
@@ -202,8 +263,17 @@ void get_terminal_size_edit(int *rows, int *cols) {
 }
 
 static int read_key_edit(void) {
-#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+#if defined(_WIN32) || defined(WIN32)
+    DWORD start = GetTickCount();
+    while (!_kbhit()) {
+        if (GetTickCount() - start > 1000) return KEY_TIMEOUT;
+        Sleep(50);
+    }
     int c = GETCH();
+#elif defined(__MSDOS__) || defined(__DOS__)
+    int c = GETCH();
+#endif
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
     if (c < 0) { exit_editor = true; return 0; }
     if (c == '\r' || c == '\n') return KEY_ENTER;
     if (c == 8 || c == 127) return KEY_BACKSPACE;
@@ -220,6 +290,8 @@ static int read_key_edit(void) {
             case 81: return PAGE_DOWN;
             case 82: return INS_KEY;
             case 83: return DEL_KEY;
+            case 119: return CTRL_HOME;
+            case 117: return CTRL_END;
             case 59: return KEY_F1;
             case 60: return KEY_F2;
             case 61: return KEY_F3;
@@ -242,7 +314,12 @@ static int read_key_edit(void) {
     return c;
 #else
     char c, seq1, seq2, seq3;
-    if (read(0, &c, 1) != 1) { exit_editor = true; return 0; }
+    struct pollfd pfd;
+    pfd.fd = 0;
+    pfd.events = POLLIN;
+    int ret = poll(&pfd, 1, 1000);
+    if (ret == 0) return KEY_TIMEOUT;
+    if (ret < 0 || read(0, &c, 1) != 1) { exit_editor = true; return 0; }
     if (c == '\r' || c == '\n') return KEY_ENTER;
     if (c == 8 || c == 127) return KEY_BACKSPACE;
 
@@ -253,22 +330,22 @@ static int read_key_edit(void) {
         tcsetattr(0, TCSANOW, &raw);
         
         if (read(0, &seq1, 1) != 1) {
-            tcsetattr(0, TCSANOW, &orig_termios);
+            raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
             return KEY_ESC;
         }
 
-        if (seq1 == 'f' || seq1 == 'F') { tcsetattr(0, TCSANOW, &orig_termios); return ALT_F; }
-        if (seq1 == 'e' || seq1 == 'E') { tcsetattr(0, TCSANOW, &orig_termios); return ALT_E; }
-        if (seq1 == 's' || seq1 == 'S') { tcsetattr(0, TCSANOW, &orig_termios); return ALT_S; }
-        if (seq1 == 'd' || seq1 == 'D') { tcsetattr(0, TCSANOW, &orig_termios); return ALT_D; }
-        if (seq1 == 'h' || seq1 == 'H') { tcsetattr(0, TCSANOW, &orig_termios); return ALT_H; }
+        if (seq1 == 'f' || seq1 == 'F') { raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw); return ALT_F; }
+        if (seq1 == 'e' || seq1 == 'E') { raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw); return ALT_E; }
+        if (seq1 == 's' || seq1 == 'S') { raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw); return ALT_S; }
+        if (seq1 == 'd' || seq1 == 'D') { raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw); return ALT_D; }
+        if (seq1 == 'h' || seq1 == 'H') { raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw); return ALT_H; }
 
         if (seq1 == '[') {
             if (read(0, &seq2, 1) == 1) {
                 if (seq2 >= '0' && seq2 <= '9') {
                     if (read(0, &seq3, 1) == 1) {
                         if (seq3 == '~') {
-                            tcsetattr(0, TCSANOW, &orig_termios);
+                            raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                             switch(seq2) {
                                 case '1': return HOME_KEY;
                                 case '2': return INS_KEY;
@@ -282,12 +359,16 @@ static int read_key_edit(void) {
                         } else if (seq3 == ';') {
                             char seq4, seq5;
                             if (read(0, &seq4, 1) == 1 && read(0, &seq5, 1) == 1) {
-                                tcsetattr(0, TCSANOW, &orig_termios);
+                                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                                 if (seq2 == '1' && seq4 == '2') {
                                     if (seq5 == 'A') return SHIFT_ARROW_UP;
                                     if (seq5 == 'B') return SHIFT_ARROW_DOWN;
                                     if (seq5 == 'C') return SHIFT_ARROW_RIGHT;
                                     if (seq5 == 'D') return SHIFT_ARROW_LEFT;
+                                }
+                                if (seq2 == '1' && seq4 == '5') {
+                                    if (seq5 == 'H') return CTRL_HOME;
+                                    if (seq5 == 'F') return CTRL_END;
                                 }
                                 if (seq2 == '2' && seq4 == '5' && seq5 == '~') return KEY_CTRL_INS;
                                 if (seq2 == '3' && seq4 == '2' && seq5 == '~') return KEY_SHIFT_DEL;
@@ -296,7 +377,7 @@ static int read_key_edit(void) {
                         } else {
                             char seq4;
                             if (read(0, &seq4, 1) == 1) {
-                                tcsetattr(0, TCSANOW, &orig_termios);
+                                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                                 if (seq4 == '~') {
                                     switch(seq3) {
                                         case '1': return KEY_F1;
@@ -312,7 +393,7 @@ static int read_key_edit(void) {
                         }
                     }
                 } else {
-                    tcsetattr(0, TCSANOW, &orig_termios);
+                    raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                     switch(seq2) {
                         case 'A': return ARROW_UP;
                         case 'B': return ARROW_DOWN;
@@ -325,8 +406,12 @@ static int read_key_edit(void) {
             }
         } else if (seq1 == 'O') {
             if (read(0, &seq2, 1) == 1) {
-                tcsetattr(0, TCSANOW, &orig_termios);
+                raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
                 switch(seq2) {
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
                     case 'H': return HOME_KEY;
                     case 'F': return END_KEY;
                     case 'P': return KEY_F1;
@@ -337,7 +422,7 @@ static int read_key_edit(void) {
                 }
             }
         }
-        tcsetattr(0, TCSANOW, &orig_termios);
+        raw.c_cc[VMIN] = 1; raw.c_cc[VTIME] = 0; tcsetattr(0, TCSANOW, &raw);
         return KEY_ESC;
     }
     return c;
@@ -371,35 +456,43 @@ static void edit_flush(void) {
 
 /* --- Editor Core Logistics --- */
 static void load_file_edit(const char *filename, bool is_initial) {
+    if (text_buffer) {
+        for (int i = 0; i < num_lines; i++) free_line(i);
+    }
+    num_lines = 0;
+    ensure_buffer_capacity(1);
     FILE *file = fopen(filename, "r");
     if (!file) {
         if (!is_initial) {
+            insert_empty_line(0);
             return;
         } else {
-            strncpy(current_filename, filename, MAX_EDIT_LENGTH - 1);
-            current_filename[MAX_EDIT_LENGTH - 1] = '\0';
-            num_lines = 1; text_buffer[0][0] = '\0';
+            strncpy(current_filename, filename, 4095);
+            current_filename[4095] = '\0';
+            insert_empty_line(0);
             cx = 0; cy = 0; row_off = 0; col_off = 0;
             return;
         }
     }
-    num_lines = 0;
-    while (num_lines < MAX_EDIT_LINES && fgets(text_buffer[num_lines], MAX_EDIT_LENGTH, file)) {
-        sanitize_ascii(text_buffer[num_lines]);
-        
-        size_t len = strlen(text_buffer[num_lines]);
-        while (len > 0 && (text_buffer[num_lines][len - 1] == '\n' || text_buffer[num_lines][len - 1] == '\r')) {
-            text_buffer[num_lines][len - 1] = '\0';
+    char line_buf[4096];
+    while (fgets(line_buf, sizeof(line_buf), file)) {
+        sanitize_ascii(line_buf);
+        size_t len = strlen(line_buf);
+        while (len > 0 && (line_buf[len - 1] == '\n' || line_buf[len - 1] == '\r')) {
+            line_buf[len - 1] = '\0';
             len--;
         }
-        num_lines++;
+        insert_empty_line(num_lines);
+        ensure_line_capacity(num_lines - 1, len + 1);
+        strcpy(text_buffer[num_lines - 1].text, line_buf);
+        text_buffer[num_lines - 1].length = len;
     }
     fclose(file);
     if (num_lines == 0) {
-        num_lines = 1; text_buffer[0][0] = '\0';
+        insert_empty_line(0);
     }
-    strncpy(current_filename, filename, MAX_EDIT_LENGTH - 1);
-    current_filename[MAX_EDIT_LENGTH - 1] = '\0';
+    strncpy(current_filename, filename, 4095);
+    current_filename[4095] = '\0';
     cx = 0; cy = 0; row_off = 0; col_off = 0;
 }
 
@@ -408,83 +501,88 @@ static void save_file_edit(void) {
     FILE *file = fopen(current_filename, "w");
     if (!file) return;
     for (int i = 0; i < num_lines; i++) {
-        fprintf(file, "%s\n", text_buffer[i]);
+        fprintf(file, "%s\n", text_buffer[i].text);
     }
     fclose(file);
 }
 
 static void insert_char(int c) {
-    int len = (int)strlen(text_buffer[cy]);
-    if (len >= MAX_EDIT_LENGTH - 1) return;
-    memmove(&text_buffer[cy][cx + 1], &text_buffer[cy][cx], len - cx + 1);
-    text_buffer[cy][cx] = (char)c;
+    int len = text_buffer[cy].length;
+    ensure_line_capacity(cy, len + 2);
+    memmove(&text_buffer[cy].text[cx + 1], &text_buffer[cy].text[cx], len - cx + 1);
+    text_buffer[cy].text[cx] = (char)c;
+    text_buffer[cy].length++;
     cx++;
 }
 
 static void insert_newline(void) {
-    if (num_lines >= MAX_EDIT_LINES) return;
-    for (int i = num_lines; i > cy + 1; i--) {
-        memmove(text_buffer[i], text_buffer[i - 1], strlen(text_buffer[i - 1]) + 1);
-    }
-    memmove(text_buffer[cy + 1], text_buffer[cy] + cx, strlen(text_buffer[cy] + cx) + 1);
-    text_buffer[cy][cx] = '\0';
-    num_lines++;
+    insert_empty_line(cy + 1);
+    int remaining_len = text_buffer[cy].length - cx;
+    ensure_line_capacity(cy + 1, remaining_len + 1);
+    memmove(text_buffer[cy + 1].text, text_buffer[cy].text + cx, remaining_len + 1);
+    text_buffer[cy + 1].length = remaining_len;
+    text_buffer[cy].text[cx] = '\0';
+    text_buffer[cy].length = cx;
     cy++;
     cx = 0;
 }
 
 static void handle_backspace(void) {
-    int len, prev_len, cur_len;
     if (cx > 0) {
-        len = (int)strlen(text_buffer[cy]);
-        memmove(&text_buffer[cy][cx - 1], &text_buffer[cy][cx], len - cx + 1);
+        int len = text_buffer[cy].length;
+        memmove(&text_buffer[cy].text[cx - 1], &text_buffer[cy].text[cx], len - cx + 1);
+        text_buffer[cy].length--;
         cx--;
     } else if (cy > 0) {
-        prev_len = (int)strlen(text_buffer[cy - 1]);
-        cur_len = (int)strlen(text_buffer[cy]);
-        if (prev_len + cur_len < MAX_EDIT_LENGTH) {
-            memmove(&text_buffer[cy - 1][prev_len], text_buffer[cy], cur_len + 1);
-            for (int i = cy; i < num_lines - 1; i++) {
-                memmove(text_buffer[i], text_buffer[i + 1], strlen(text_buffer[i + 1]) + 1);
-            }
-            num_lines--; cy--; cx = prev_len;
+        int prev_len = text_buffer[cy - 1].length;
+        int cur_len = text_buffer[cy].length;
+        ensure_line_capacity(cy - 1, prev_len + cur_len + 1);
+        memmove(&text_buffer[cy - 1].text[prev_len], text_buffer[cy].text, cur_len + 1);
+        text_buffer[cy - 1].length += cur_len;
+        free_line(cy);
+        for (int i = cy; i < num_lines - 1; i++) {
+            text_buffer[i] = text_buffer[i + 1];
         }
+        num_lines--; cy--; cx = prev_len;
     }
 }
 
 static void handle_delete(void) {
-    int cur_len, next_len;
-    cur_len = (int)strlen(text_buffer[cy]);
+    int cur_len = text_buffer[cy].length;
     if (cx < cur_len) {
-        memmove(&text_buffer[cy][cx], &text_buffer[cy][cx + 1], cur_len - cx);
+        memmove(&text_buffer[cy].text[cx], &text_buffer[cy].text[cx + 1], cur_len - cx);
+        text_buffer[cy].length--;
     } else if (cy < num_lines - 1) {
-        next_len = (int)strlen(text_buffer[cy + 1]);
-        if (cur_len + next_len < MAX_EDIT_LENGTH) {
-            memmove(&text_buffer[cy][cur_len], text_buffer[cy + 1], next_len + 1);
-            for (int i = cy + 1; i < num_lines - 1; i++) {
-                memmove(text_buffer[i], text_buffer[i + 1], strlen(text_buffer[i + 1]) + 1);
-            }
-            num_lines--;
+        int next_len = text_buffer[cy + 1].length;
+        ensure_line_capacity(cy, cur_len + next_len + 1);
+        memmove(&text_buffer[cy].text[cur_len], text_buffer[cy + 1].text, next_len + 1);
+        text_buffer[cy].length += next_len;
+        free_line(cy + 1);
+        for (int i = cy + 1; i < num_lines - 1; i++) {
+            text_buffer[i] = text_buffer[i + 1];
         }
+        num_lines--;
     }
 }
 
 static void delete_current_line(void) {
     if (num_lines > 1) {
-        for (int i = cy; i < num_lines - 1; i++) strcpy(text_buffer[i], text_buffer[i + 1]);
+        free_line(cy);
+        for (int i = cy; i < num_lines - 1; i++) text_buffer[i] = text_buffer[i + 1];
         num_lines--;
         if (cy >= num_lines) cy = num_lines - 1;
-        if (cx > (int)strlen(text_buffer[cy])) cx = (int)strlen(text_buffer[cy]);
+        if (cx > (int)text_buffer[cy].length) cx = text_buffer[cy].length;
     } else {
-        text_buffer[0][0] = '\0';
+        text_buffer[0].text[0] = '\0';
+        text_buffer[0].length = 0;
         cx = 0;
     }
 }
 
 static int get_render_x(int row, int physical_x) {
     int rx = 0;
-    for (int j = 0; j < physical_x && text_buffer[row][j] != '\0'; j++) {
-        if (text_buffer[row][j] == '\t') rx += (TAB_STOP - 1) - (rx % TAB_STOP);
+    for (int j = 0; j < physical_x && text_buffer[row].text[j] != '\0'; j++) {
+        if (text_buffer[row].text[j] == '\t') rx += (TAB_STOP - 1) - (rx % TAB_STOP);
         rx++;
     }
     return rx;
@@ -492,9 +590,9 @@ static int get_render_x(int row, int physical_x) {
 
 static int get_physical_x(int row, int target_x) {
     int rx = 0, j;
-    for (j = 0; text_buffer[row][j] != '\0'; j++) {
+    for (j = 0; text_buffer[row].text[j] != '\0'; j++) {
         int next_rx = rx;
-        if (text_buffer[row][j] == '\t') next_rx += (TAB_STOP - 1) - (rx % TAB_STOP);
+        if (text_buffer[row].text[j] == '\t') next_rx += (TAB_STOP - 1) - (rx % TAB_STOP);
         next_rx++;
         if (next_rx > target_x) return j;
         rx = next_rx;
@@ -504,29 +602,78 @@ static int get_physical_x(int row, int target_x) {
 
 static void render_row(int row, char *out_buf) {
     int j = 0, idx = 0;
-    while (text_buffer[row][j] != '\0' && idx < (MAX_RENDER_BUF - 1)) {
-        if (text_buffer[row][j] == '\t') {
+    while (text_buffer[row].text[j] != '\0' && idx < (MAX_RENDER_BUF - 1)) {
+        if (text_buffer[row].text[j] == '\t') {
             out_buf[idx++] = ' ';
             while (idx % TAB_STOP != 0 && idx < (MAX_RENDER_BUF - 1)) out_buf[idx++] = ' ';
         } else {
-            out_buf[idx++] = text_buffer[row][j];
+            out_buf[idx++] = text_buffer[row].text[j];
         }
         j++;
     }
     out_buf[idx] = '\0';
 }
 
+static void format_filename_for_status(char *out_buf, const char *in_filename, int max_len) {
+    if (!in_filename || !in_filename[0]) {
+        strcpy(out_buf, "NEW FILE");
+        return;
+    }
+    char abs_path[4096];
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+    if (_fullpath(abs_path, in_filename, 4096) == NULL) {
+        strcpy(abs_path, in_filename);
+    }
+#else
+    if (realpath(in_filename, abs_path) == NULL) {
+        strcpy(abs_path, in_filename);
+    }
+#endif
+
+    int len = (int)strlen(abs_path);
+    if (len <= max_len) {
+        strcpy(out_buf, abs_path);
+        return;
+    }
+    
+    /* Find base filename */
+    const char *base = abs_path;
+    for (int i = len - 1; i >= 0; i--) {
+        if (abs_path[i] == '/' || abs_path[i] == '\\') {
+            base = &abs_path[i + 1];
+            break;
+        }
+    }
+    
+    int base_len = (int)strlen(base);
+    if (base_len >= max_len) {
+        strcpy(out_buf, base);
+        return;
+    }
+    
+#if defined(_WIN32) || defined(WIN32) || defined(__MSDOS__) || defined(__DOS__)
+    const char *prefix = "C:\\...\\";
+#else
+    const char *prefix = "/.../";
+#endif
+
+    int prefix_len = (int)strlen(prefix);
+    if (prefix_len + base_len <= max_len) {
+        sprintf(out_buf, "%s%s", prefix, base);
+    } else {
+        strcpy(out_buf, base);
+    }
+}
+
 /* --- UI Rendering Primitives --- */
 static void draw_all(void) {
-    int y, i, file_row, len, print_len, pad;
+    int y, i, file_row, len, print_len;
     char r_buf[MAX_RENDER_BUF];
-    char status[512];
-    char title_str[MAX_EDIT_LENGTH + 64];
     
     edit_print("\x1b[?25l");
     
     /* 1. Menu Bar */
-    edit_print("\x1b[1;1H" COL_MENU "\x1b[K");
+    edit_print("\x1b[1;1H" COL_MENU "\x1b[K"); 
     for (i = 0; i < num_menus; i++) {
         edit_print("\x1b[1;%dH", menu_x[i]);
         if (menu_mode > 0 && menu_col == i) edit_print(COL_MENU_SEL);
@@ -534,16 +681,29 @@ static void draw_all(void) {
         edit_print("%s", menu_names[i]);
     }
     
-    /* 2. Editor Header */
-    edit_print("\x1b[2;1H%s\x1b[K", bright_colors[color_index]);
-    sprintf(title_str, "[ %s ]", current_filename[0] ? current_filename : "Untitled");
-    pad = (screen_cols - (int)strlen(title_str)) / 2;
-    if (pad < 0) pad = 0;
-    edit_print("\x1b[2;%dH%s", pad + 1, title_str);
+    edit_print(COL_MENU);
+    if (current_filename[0]) {
+        const char *basename = current_filename;
+        const char *p = current_filename;
+        while (*p) {
+            if (*p == '/' || *p == '\\') basename = p + 1;
+            p++;
+        }
+        edit_print("  [ %s ]", basename);
+    }
+    
+    time_t rawtime;
+    struct tm *timeinfo;
+    char time_str[64];
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", timeinfo);
+    int time_len = (int)strlen(time_str);
+    edit_print("\x1b[1;%dH%s", screen_cols - time_len - 1, time_str);
     
     /* 3. Editor Content Area */
-    for (y = 3; y <= screen_rows - 1; y++) {
-        file_row = row_off + (y - 3);
+    for (y = 2; y <= screen_rows - 1; y++) {
+        file_row = row_off + (y - 2);
         edit_print("\x1b[%d;1H%s", y, bright_colors[color_index]); 
         
         int draw_cols = screen_cols;
@@ -574,15 +734,23 @@ static void draw_all(void) {
     }
     
     /* 5. Status Bar */
-    sprintf(status, " ESC=Menu %-20s                LINE:%-4d/%-4d COL:%-4d", 
-            current_filename[0] ? current_filename : "NEW FILE", 
-            cy + 1, num_lines, cx + 1);
+    char right_status[128];
+    sprintf(right_status, "LINE:%d:%d - COL:%d", cy + 1, num_lines, cx + 1);
+    int rl = (int)strlen(right_status);
     
-    len = (int)strlen(status);
-    if (len > screen_cols - 1) len = screen_cols - 1;
-    edit_print("\x1b[%d;1H" COL_STATUS, screen_rows);
-    edit_print("%.*s", len, status);
-    for (i = len; i < screen_cols - 1; i++) edit_print(" ");
+    char left_status[4200];
+    char trunc_name[2048];
+    format_filename_for_status(trunc_name, current_filename, screen_cols - rl - 15);
+    sprintf(left_status, " ESC=Menu %s", trunc_name);
+    int ll = (int)strlen(left_status);
+    
+    int pad = screen_cols - ll - rl - 3;
+    if (pad < 1) pad = 1; // Just ensure we have at least 1 space
+    
+    edit_print("\x1b[%d;1H" COL_STATUS "\x1b[K", screen_rows);
+    edit_print("%s", left_status);
+    for (i = 0; i < pad; i++) edit_print(" ");
+    edit_print("%s", right_status);
     
     /* 6. Active Dropdown Modal */
     if (menu_mode == 2) {
@@ -643,6 +811,7 @@ static int prompt_input_edit(const char *title, char *buf) {
         edit_print("\x1b[%d;%dH\x1b[?25h", y + 3, x + 4 + len);
         edit_flush();
         c = read_key_edit();
+        if (c == KEY_TIMEOUT) { draw_all(); continue; }
         if (c == KEY_ESC) return 0;
         if (c == KEY_ENTER) return 1;
         if (c == KEY_BACKSPACE) {
@@ -685,6 +854,7 @@ static void show_message(const char *title, const char *msg) {
         edit_print("\x1b[%d;%dH" COL_MENU " < OK > ", y + 6, x + w / 2 - 4);
         edit_flush();
         c = read_key_edit();
+        if (c == KEY_TIMEOUT) { draw_all(); continue; }
         if (c == KEY_ESC || c == KEY_ENTER || c == 32) return;
     }
 }
@@ -693,11 +863,11 @@ static void do_find(void) {
     char *p;
     for (int r = cy; r < num_lines; r++) {
         int start_x = (r == cy) ? cx + 1 : 0;
-        if (start_x < (int)strlen(text_buffer[r])) {
-            p = strstr(text_buffer[r] + start_x, search_term);
+        if (start_x < (int)text_buffer[r].length) {
+            p = strstr(text_buffer[r].text + start_x, search_term);
             if (p) {
                 cy = r;
-                cx = (int)(p - text_buffer[r]);
+                cx = (int)(p - text_buffer[r].text);
                 target_rx = get_render_x(cy, cx);
                 return;
             }
@@ -726,9 +896,9 @@ static char* get_selected_text_edit(void) {
     int pos = 0;
     for (int r = r1; r <= r2; r++) {
         int start = (r == r1) ? c1 : 0;
-        int end = (r == r2) ? c2 : (int)strlen(text_buffer[r]);
+        int end = (r == r2) ? c2 : (int)text_buffer[r].length;
         for (int i = start; i < end; i++) {
-            buf[pos++] = text_buffer[r][i];
+            buf[pos++] = text_buffer[r].text[i];
         }
         if (r < r2) {
             buf[pos++] = '\n';
@@ -743,16 +913,23 @@ static void delete_selected_text_edit(void) {
     int r1, c1, r2, c2;
     get_sel_bounds(&r1, &c1, &r2, &c2);
     
-    char rem[MAX_EDIT_LENGTH];
-    strcpy(rem, text_buffer[r2] + c2);
+    int rem_len = text_buffer[r2].length - c2;
+    char *rem = malloc(rem_len + 1);
+    if (!rem) oom();
+    strcpy(rem, text_buffer[r2].text + c2);
     
-    text_buffer[r1][c1] = '\0';
-    strncat(text_buffer[r1], rem, MAX_EDIT_LENGTH - strlen(text_buffer[r1]) - 1);
+    text_buffer[r1].text[c1] = '\0';
+    text_buffer[r1].length = c1;
+    ensure_line_capacity(r1, c1 + rem_len + 1);
+    strcat(text_buffer[r1].text, rem);
+    text_buffer[r1].length += rem_len;
+    free(rem);
     
     int lines_to_del = r2 - r1;
     if (lines_to_del > 0) {
+        for (int i = r1 + 1; i <= r2; i++) free_line(i);
         for (int i = r1 + 1; i < num_lines - lines_to_del; i++) {
-            strcpy(text_buffer[i], text_buffer[i + lines_to_del]);
+            text_buffer[i] = text_buffer[i + lines_to_del];
         }
         num_lines -= lines_to_del;
     }
@@ -769,23 +946,25 @@ static void insert_text_at_cursor_edit(const char *text) {
             insert_newline();
             p++;
         } else {
-            if (strlen(text_buffer[cy]) < MAX_EDIT_LENGTH - 1) {
-                memmove(&text_buffer[cy][cx + 1], &text_buffer[cy][cx], strlen(text_buffer[cy]) - cx + 1);
-                text_buffer[cy][cx] = *p;
-                cx++;
-            }
+            int len = text_buffer[cy].length;
+            ensure_line_capacity(cy, len + 2);
+            memmove(&text_buffer[cy].text[cx + 1], &text_buffer[cy].text[cx], len - cx + 1);
+            text_buffer[cy].text[cx] = *p;
+            text_buffer[cy].length++;
+            cx++;
             p++;
         }
     }
 }
 
 static void execute_menu_edit(void) {
-    char buf[MAX_EDIT_LENGTH];
+    char buf[4096];
     menu_mode = 0;
     
     if (menu_col == 0) {
         if (menu_row == 0) {
-            num_lines = 1; text_buffer[0][0] = '\0'; cy=0; cx=0; current_filename[0]='\0';
+            if (text_buffer) { for (int i = 0; i < num_lines; i++) free_line(i); }
+            num_lines = 0; insert_empty_line(0); cy=0; cx=0; current_filename[0]='\0';
             row_off = 0; col_off = 0;
         } else if (menu_row == 1) {
             buf[0] = '\0';
@@ -815,11 +994,11 @@ static void execute_menu_edit(void) {
         if (menu_row == 0) {
             char *sel = get_selected_text_edit();
             if (sel) { strcpy(clipboard_line, sel); free(sel); delete_selected_text_edit(); }
-            else { strcpy(clipboard_line, text_buffer[cy]); delete_current_line(); }
+            else { strcpy(clipboard_line, text_buffer[cy].text); delete_current_line(); }
         } else if (menu_row == 1) {
             char *sel = get_selected_text_edit();
             if (sel) { strcpy(clipboard_line, sel); free(sel); }
-            else { strcpy(clipboard_line, text_buffer[cy]); }
+            else { strcpy(clipboard_line, text_buffer[cy].text); }
         } else if (menu_row == 2) {
             insert_text_at_cursor_edit(clipboard_line);
         } else if (menu_row == 3) {
@@ -845,7 +1024,7 @@ static void execute_menu_edit(void) {
     } else if (menu_col == 4) {
         if (menu_row == 0) {
             char about_msg[128];
-            sprintf(about_msg, "Standalone Plaintext Editor");
+            sprintf(about_msg, "Standalone Plaintext Editor 3.1.0");
             show_message(" About ", about_msg);
         }
     }
@@ -856,7 +1035,7 @@ int main(int argc, char **argv) {
     bool moved_vertically = false;
     
     if (argc > 1) load_file_edit(argv[1], true);
-    else { num_lines = 1; text_buffer[0][0] = '\0'; current_filename[0] = '\0'; }
+    else { num_lines = 0; insert_empty_line(0); current_filename[0] = '\0'; }
 
     init_term();
     
@@ -885,6 +1064,8 @@ int main(int argc, char **argv) {
         c = read_key_edit();
         moved_vertically = false;
         
+        if (c == KEY_TIMEOUT) continue;
+        
         if (c == KEY_ESC) {
             if (menu_mode == 0) { menu_mode = 1; menu_col = 0; }
             else if (menu_mode == 2) { menu_mode = 1; }
@@ -897,7 +1078,7 @@ int main(int argc, char **argv) {
         if (c == KEY_F1) { show_message(" Help ", "Standalone C17 Editor"); continue; }
         if (c == KEY_F2) {
             if (current_filename[0] == '\0') {
-                char buf[MAX_EDIT_LENGTH]; buf[0] = '\0';
+                char buf[4096]; buf[0] = '\0';
                 if (prompt_input_edit(" Save As ", buf) && buf[0] != '\0') {
                     strcpy(current_filename, buf); save_file_edit();
                 }
@@ -905,7 +1086,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (c == KEY_F3) {
-            char buf[MAX_EDIT_LENGTH]; buf[0] = '\0';
+            char buf[4096]; buf[0] = '\0';
             if (prompt_input_edit(" Open ", buf) && buf[0] != '\0') load_file_edit(buf, false);
             continue;
         }
@@ -935,12 +1116,12 @@ int main(int argc, char **argv) {
             else if (c == SHIFT_ARROW_DOWN) { update_sel_end(cy < num_lines - 1 ? cy + 1 : num_lines - 1, cx); cy = sel_end_r; }
             else if (c == SHIFT_ARROW_LEFT) { 
                 update_sel_end(cy, cx > 0 ? cx - 1 : 0); 
-                if (cx == 0 && cy > 0) update_sel_end(cy - 1, (int)strlen(text_buffer[cy-1]));
+                if (cx == 0 && cy > 0) update_sel_end(cy - 1, (int)text_buffer[cy-1].length);
                 cx = sel_end_c; cy = sel_end_r; 
             }
             else if (c == SHIFT_ARROW_RIGHT) { 
-                update_sel_end(cy, cx < (int)strlen(text_buffer[cy]) ? cx + 1 : cx); 
-                if (cx == (int)strlen(text_buffer[cy]) && cy < num_lines - 1) update_sel_end(cy + 1, 0);
+                update_sel_end(cy, cx < (int)text_buffer[cy].length ? cx + 1 : cx); 
+                if (cx == (int)text_buffer[cy].length && cy < num_lines - 1) update_sel_end(cy + 1, 0);
                 cx = sel_end_c; cy = sel_end_r; 
             }
             else if (c == KEY_CTRL_INS) {
@@ -954,7 +1135,7 @@ int main(int argc, char **argv) {
             else if (c == KEY_SHIFT_INS) {
                 insert_text_at_cursor_edit(clipboard_line);
             }
-            else if (c == ARROW_UP || c == ARROW_DOWN || c == ARROW_LEFT || c == ARROW_RIGHT || c == HOME_KEY || c == END_KEY || c == PAGE_UP || c == PAGE_DOWN) {
+            else if (c == ARROW_UP || c == ARROW_DOWN || c == ARROW_LEFT || c == ARROW_RIGHT || c == HOME_KEY || c == END_KEY || c == PAGE_UP || c == PAGE_DOWN || c == CTRL_HOME || c == CTRL_END) {
                 clear_sel();
             }
             else {
@@ -966,16 +1147,18 @@ int main(int argc, char **argv) {
                 case ARROW_DOWN: if (cy < num_lines - 1) { cy++; moved_vertically = true; } break;
                 case ARROW_LEFT: 
                     if (cx > 0) cx--; 
-                    else if (cy > 0) { cy--; cx = (int)strlen(text_buffer[cy]); }
+                    else if (cy > 0) { cy--; cx = (int)text_buffer[cy].length; }
                     break;
                 case ARROW_RIGHT:
-                    if (cx < (int)strlen(text_buffer[cy])) cx++;
+                    if (cx < (int)text_buffer[cy].length) cx++;
                     else if (cy < num_lines - 1) { cy++; cx = 0; }
                     break;
                 case PAGE_UP: cy -= (screen_rows - 3); if (cy < 0) cy = 0; moved_vertically = true; break;
                 case PAGE_DOWN: cy += (screen_rows - 3); if (cy >= num_lines) cy = num_lines - 1; moved_vertically = true; break;
                 case HOME_KEY: cx = 0; break;
-                case END_KEY: cx = (int)strlen(text_buffer[cy]); break;
+                case END_KEY: cx = (int)text_buffer[cy].length; break;
+                case CTRL_HOME: cy = 0; cx = 0; moved_vertically = true; break;
+                case CTRL_END: cy = num_lines - 1; cx = (int)text_buffer[cy].length; moved_vertically = true; break;
                 case DEL_KEY: handle_delete(); break;
                 case KEY_ENTER: insert_newline(); break;
                 case KEY_BACKSPACE: handle_backspace(); break;
@@ -987,7 +1170,7 @@ int main(int argc, char **argv) {
             }
             if (moved_vertically) cx = get_physical_x(cy, target_rx);
             else {
-                if (cx > (int)strlen(text_buffer[cy])) cx = (int)strlen(text_buffer[cy]);
+                if (cx > (int)text_buffer[cy].length) cx = (int)text_buffer[cy].length;
                 target_rx = get_render_x(cy, cx);
             }
         }

@@ -630,7 +630,7 @@ static void edit_flush(void) {
 }
 
 /* --- Editor Core Logistics --- */
-static void load_file_edititit(const char *filename, bool is_initial) {
+static void load_file_edit(const char *filename, bool is_initial) {
     if (text_buffer) {
         for (int i = 0; i < num_lines; i++) free_line(i);
         free(text_buffer); text_buffer = NULL;
@@ -747,7 +747,7 @@ static void load_file_edititit(const char *filename, bool is_initial) {
     cx = 0; cy = 0; row_off = 0; col_off = 0;
 }
 
-static void save_file_edititit(void) {
+static void save_file_edit(void) {
     if (is_read_only) return;
     if (current_filename[0] == '\0') return;
     FILE *file = fopen(current_filename, "w");
@@ -1248,23 +1248,23 @@ static void execute_menu_edit(void) {
         } else if (menu_row == 1) {
             buf[0] = '\0';
             if (prompt_input_edit(" Open ", buf) && buf[0] != '\0') {
-                load_file_edititit(buf, false);
+                load_file_edit(buf, false);
             }
         } else if (menu_row == 2) {
             if (current_filename[0] == '\0') {
                 buf[0] = '\0';
                 if (prompt_input_edit(" Save As ", buf) && buf[0] != '\0') {
                     strcpy(current_filename, buf);
-                    save_file_edititit();
+                    save_file_edit();
                 }
             } else {
-                save_file_edititit();
+                save_file_edit();
             }
         } else if (menu_row == 3) {
             strcpy(buf, current_filename);
             if (prompt_input_edit(" Save As ", buf) && buf[0] != '\0') {
                 strcpy(current_filename, buf);
-                save_file_edititit();
+                save_file_edit();
             }
         } else if (menu_row == 4) {
             exit_editor = true;
@@ -1315,7 +1315,7 @@ int main(int argc, char **argv) {
     int c, rx, visible_rows, visible_cols, max_rows;
     bool moved_vertically = false;
     
-    if (argc > 1) load_file_edititit(argv[1], true);
+    if (argc > 1) load_file_edit(argv[1], true);
     else { num_lines = 0; insert_empty_line(0); current_filename[0] = '\0'; }
 
     init_term();
@@ -1361,14 +1361,14 @@ int main(int argc, char **argv) {
             if (current_filename[0] == '\0') {
                 char buf[4096]; buf[0] = '\0';
                 if (prompt_input_edit(" Save As ", buf) && buf[0] != '\0') {
-                    strcpy(current_filename, buf); save_file_edititit();
+                    strcpy(current_filename, buf); save_file_edit();
                 }
-            } else save_file_edititit();
+            } else save_file_edit();
             continue;
         }
         if (c == KEY_F3) {
             char buf[4096]; buf[0] = '\0';
-            if (prompt_input_edit(" Open ", buf) && buf[0] != '\0') load_file_edititit(buf, false);
+            if (prompt_input_edit(" Open ", buf) && buf[0] != '\0') load_file_edit(buf, false);
             continue;
         }
         if (c == KEY_F4) { exit_editor = true; continue; }

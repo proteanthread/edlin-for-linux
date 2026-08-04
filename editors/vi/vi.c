@@ -1038,6 +1038,7 @@ void exit_editor(void) {
 }
 
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IOFBF, 8192);
     
     int c;
 

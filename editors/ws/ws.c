@@ -980,6 +980,7 @@ static void refresh_screen(void) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOFBF, 8192);
     
     int c, len, visible_rows, rx;
     bool moved_vertically = false;

@@ -1,0 +1,1 @@
+[0mws_print[94m([0m[93m"%s/*"[0m, comm_color[94m)[0m;

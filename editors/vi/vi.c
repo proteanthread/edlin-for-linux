@@ -1,6 +1,6 @@
 /*
  *
- * VERSION: 3.1.0
+ * VERSION: 4.1.0
  * LICENSE: MIT License
  * COPYLEFT: BASIC++ Community
  *
@@ -15,9 +15,22 @@
 #endif
 
 #include <stdio.h>
+#define _FILE_OFFSET_BITS 64
+#define _FILE_OFFSET_BITS 64
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <ctype.h>
+
+#if defined(_WIN32) || defined(WIN32)
+  #define fseek_64 _fseeki64
+  #define ftell_64 _ftelli64
+#else
+  #define fseek_64 fseeko
+  #define ftell_64 ftello
+#endif
+
 #include <time.h>
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__MSDOS__) && !defined(__DOS__)
@@ -89,10 +102,133 @@ static void sanitize_ascii(char* str) {
 int current_lines = 0;
 typedef struct {
     char *text;
-    size_t length;
-    size_t capacity;
+    int64_t disk_offset;
+    int length;
+    int capacity;
+    int in_multiline_comment;
 } Line;
 Line *text_buffer = NULL;
+
+static int is_syntax_keyword(const char *word, int len) {
+    static const char *keywords[] = {
+        "if", "else", "while", "for", "return", "switch", "case", "break", "continue",
+        "int", "char", "void", "float", "double", "bool", "static", "const", "struct", "class", "public", "private", "unsigned", "long", "short", "sizeof"
+    };
+    for (int i = 0; i < (int)(sizeof(keywords)/sizeof(keywords[0])); i++) {
+        if (len == (int)strlen(keywords[i]) && strncmp(word, keywords[i], len) == 0) return 1;
+    }
+    return 0;
+}
+
+static void print_syntax_highlighted(const char *text, int *in_multiline_comment, int is_selected) {
+    if (!text) return;
+    int len = (int)strlen(text);
+    int i = 0;
+    
+    // Base color for normal text
+    const char *base_color = is_selected ? "\x1b[7m" : "\x1b[0m";
+    const char *kw_color = "\x1b[96m"; // Cyan for keywords
+    const char *str_color = "\x1b[93m"; // Yellow for strings
+    const char *num_color = "\x1b[95m"; // Magenta for numbers
+    const char *op_color = "\x1b[92m"; // Green for operators
+    const char *comm_color = "\x1b[90m"; // Gray for comments
+    const char *struct_color = "\x1b[94m"; // Bright Blue for (){}[]
+    
+    printf("%s", base_color);
+
+    while (i < len) {
+        if (*in_multiline_comment) {
+            printf("%s", comm_color);
+            while (i < len) {
+                if (text[i] == '*' && i + 1 < len && text[i+1] == '/') {
+                    printf("*/%s", base_color);
+                    *in_multiline_comment = 0;
+                    i += 2;
+                    break;
+                }
+                printf("%c", text[i++]);
+            }
+            continue;
+        }
+
+        if (text[i] == '"' || text[i] == '\'') {
+            char quote = text[i];
+            printf("%s%c", str_color, text[i++]);
+            while (i < len) {
+                if (text[i] == '\\' && i + 1 < len) {
+                    printf("\\%c", text[i+1]);
+                    i += 2;
+                } else if (text[i] == quote) {
+                    printf("%c%s", text[i++], base_color);
+                    break;
+                } else {
+                    printf("%c", text[i++]);
+                }
+            }
+            continue;
+        }
+
+        if (text[i] == '/' && i + 1 < len && text[i+1] == '*') {
+            printf("%s/*", comm_color);
+            *in_multiline_comment = 1;
+            i += 2;
+            continue;
+        }
+
+        if (text[i] == '/' && i + 1 < len && text[i+1] == '/') {
+            printf("%s", comm_color);
+            while (i < len) printf("%c", text[i++]);
+            printf("%s", base_color);
+            break;
+        }
+
+        if (isalpha((unsigned char)text[i]) || text[i] == '_') {
+            int start = i;
+            while (i < len && (isalnum((unsigned char)text[i]) || text[i] == '_')) i++;
+            int wlen = i - start;
+            if (is_syntax_keyword(text + start, wlen)) {
+                printf("%s", kw_color);
+                for (int j = start; j < i; j++) printf("%c", text[j]);
+                printf("%s", base_color);
+            } else {
+                for (int j = start; j < i; j++) printf("%c", text[j]);
+            }
+            continue;
+        }
+
+        if (isdigit((unsigned char)text[i])) {
+            printf("%s", num_color);
+            while (i < len && (isalnum((unsigned char)text[i]) || text[i] == '.')) {
+                printf("%c", text[i++]);
+            }
+            printf("%s", base_color);
+            continue;
+        }
+
+        if (strchr("+-*/=<>!&|%^~?:", text[i])) {
+            printf("%s%c%s", op_color, text[i++], base_color);
+            continue;
+        }
+        if (strchr("()[]{}", text[i])) {
+            printf("%s%c%s", struct_color, text[i++], base_color);
+            continue;
+        }
+
+        printf("%c", text[i++]);
+    }
+}
+
+
+static char view_buf[8192];
+static FILE *orig_file = NULL;
+static FILE *index_file = NULL;
+static bool is_fully_loaded = false;
+static bool is_read_only = false;
+
+static Line get_line_info(int row);
+static void free_line(int row);
+static void ensure_line_in_memory(int row);
+static void ensure_line_capacity(int row, size_t needed);
 int text_buffer_capacity = 0;
 char current_filename[4096] = "";
 char cmd_buffer[4096] = "";
@@ -102,8 +238,51 @@ static void oom(void) {
     exit(1);
 }
 
+static Line get_line_info(int row) {
+    if (text_buffer) return text_buffer[row];
+    Line l;
+    memset(&l, 0, sizeof(Line));
+    if (index_file) {
+        fseek_64(index_file, (int64_t)row * sizeof(Line), SEEK_SET);
+        fread(&l, sizeof(Line), 1, index_file);
+    }
+    return l;
+}
+
+static const char* get_line_text(int row) {
+    int clines = current_lines;
+    if (row < 0 || row >= clines) return "";
+    if (text_buffer && text_buffer[row].text) return text_buffer[row].text;
+    Line l = get_line_info(row);
+    if (l.text) return l.text;
+    if (!orig_file) return "";
+    fseek_64(orig_file, l.disk_offset, SEEK_SET);
+    int to_read = l.length;
+    if (to_read >= (int)sizeof(view_buf)) to_read = sizeof(view_buf) - 1;
+    if (to_read > 0) fread(view_buf, 1, to_read, orig_file);
+    view_buf[to_read] = '\0';
+    return view_buf;
+}
+
+static void ensure_line_in_memory(int row) {
+    if (is_read_only) return;
+    if (is_fully_loaded) return;
+    if (row < 0 || row >= current_lines) return;
+    if (!get_line_text(row)) {
+        text_buffer[row].capacity = get_line_info(row).length + 128;
+        text_buffer[row].text = malloc(text_buffer[row].capacity);
+        if (!get_line_text(row)) oom();
+        if (get_line_info(row).length > 0 && orig_file) {
+            fseek_64(orig_file, text_buffer[row].disk_offset, SEEK_SET);
+            fread(text_buffer[row].text, 1, get_line_info(row).length, orig_file);
+        }
+        text_buffer[row].text[get_line_info(row).length] = '\0';
+    }
+}
+
 static void ensure_line_capacity(int row, size_t needed) {
-    if (needed > text_buffer[row].capacity) {
+    ensure_line_in_memory(row);
+    if (needed > (size_t)text_buffer[row].capacity) {
         size_t new_cap = text_buffer[row].capacity * 2;
         if (new_cap < needed) new_cap = needed;
         if (new_cap < 128) new_cap = 128;
@@ -136,11 +315,12 @@ static void insert_empty_line(int row) {
     text_buffer[row].text[0] = '\0';
     text_buffer[row].length = 0;
     text_buffer[row].capacity = 128;
+    text_buffer[row].in_multiline_comment = 0;
     current_lines++;
 }
 
 static void free_line(int row) {
-    if (text_buffer[row].text) {
+    if (text_buffer && text_buffer[row].text) {
         free(text_buffer[row].text);
         text_buffer[row].text = NULL;
     }
@@ -173,9 +353,7 @@ HANDLE hOut;
 DWORD dwMode;
 #endif
 
-static bool sel_active = false;
-static int sel_start_r = 0, sel_start_c = 0;
-static int sel_end_r = 0, sel_end_c = 0;
+
 
 void get_terminal_size(void) {
 #if defined(_WIN32) || defined(WIN32)
@@ -225,15 +403,7 @@ void init_term(void) {
 #endif
 }
 
-static void get_sel_bounds(int *r1, int *c1, int *r2, int *c2) {
-    if (sel_start_r < sel_end_r || (sel_start_r == sel_end_r && sel_start_c <= sel_end_c)) {
-        *r1 = sel_start_r; *c1 = sel_start_c;
-        *r2 = sel_end_r; *c2 = sel_end_c;
-    } else {
-        *r1 = sel_end_r; *c1 = sel_end_c;
-        *r2 = sel_start_r; *c2 = sel_start_c;
-    }
-}
+
 
 int get_input(void) {
     if (pushed_char != -1) {
@@ -376,12 +546,33 @@ int get_input(void) {
 void load_file(const char *filename) {
     if (text_buffer) {
         for (int i = 0; i < current_lines; i++) free_line(i);
+        free(text_buffer); text_buffer = NULL;
     }
+    if (orig_file) { fclose(orig_file); orig_file = NULL; }
+    if (index_file) { fclose(index_file); index_file = NULL; }
+    is_fully_loaded = false;
+    is_read_only = false;
     current_lines = 0;
-    ensure_buffer_capacity(1);
+    text_buffer_capacity = 0;
+
     FILE *file = fopen(filename, "r");
-    if (file) {
+    if (!file) {
+        current_lines = 0;
+        insert_empty_line(0);
+        strncpy(current_filename, filename, 4095);
+        current_filename[4095] = '\0';
+        return;
+    }
+
+    fseek_64(file, 0, SEEK_END);
+    int64_t file_size = ftell_64(file);
+    fseek_64(file, 0, SEEK_SET);
+
+    if (file_size < 64 * 1024 * 1024) {
+        is_fully_loaded = true;
+        ensure_buffer_capacity(1);
         char line_buf[4096];
+        int in_multi = 0;
         while (fgets(line_buf, sizeof(line_buf), file)) {
             sanitize_ascii(line_buf);
             int len = (int)strlen(line_buf);
@@ -393,19 +584,82 @@ void load_file(const char *filename) {
             ensure_line_capacity(current_lines - 1, len + 1);
             strcpy(text_buffer[current_lines - 1].text, line_buf);
             text_buffer[current_lines - 1].length = len;
+            text_buffer[current_lines - 1].in_multiline_comment = in_multi;
+            
+            for (int i = 0; i < len; i++) {
+                if (in_multi) {
+                    if (line_buf[i] == '*' && i + 1 < len && line_buf[i+1] == '/') {
+                        in_multi = 0; i++;
+                    }
+                } else {
+                    if (line_buf[i] == '/' && i + 1 < len && line_buf[i+1] == '*') {
+                        in_multi = 1; i++;
+                    } else if (line_buf[i] == '/' && i + 1 < len && line_buf[i+1] == '/') {
+                        break;
+                    } else if (line_buf[i] == '"' || line_buf[i] == '\'') {
+                        char q = line_buf[i++];
+                        while (i < len) {
+                            if (line_buf[i] == '\\' && i + 1 < len) i += 2;
+                            else if (line_buf[i] == q) break;
+                            else i++;
+                        }
+                    }
+                }
+            }
         }
         fclose(file);
+    } else {
+        orig_file = file;
+        char line_buf[4096];
+        int64_t current_offset = 0;
+        while (fgets(line_buf, sizeof(line_buf), orig_file)) {
+            sanitize_ascii(line_buf);
+            int len = (int)strlen(line_buf);
+            while (len > 0 && (line_buf[len - 1] == '\n' || line_buf[len - 1] == '\r')) {
+                line_buf[len - 1] = '\0';
+                len--;
+            }
+            if (!is_read_only && (current_lines + 1) * sizeof(Line) > 256 * 1024 * 1024) {
+                is_read_only = true;
+                index_file = tmpfile();
+                if (index_file && text_buffer) {
+                    fwrite(text_buffer, sizeof(Line), current_lines, index_file);
+                }
+                if (text_buffer) { free(text_buffer); text_buffer = NULL; }
+            }
+            if (!is_read_only) {
+                ensure_buffer_capacity(current_lines + 1);
+                text_buffer[current_lines].text = NULL;
+                text_buffer[current_lines].disk_offset = current_offset;
+                text_buffer[current_lines].length = len;
+                text_buffer[current_lines].capacity = 0;
+                text_buffer[current_lines].in_multiline_comment = 0;
+            } else if (index_file) {
+                Line l;
+                memset(&l, 0, sizeof(Line));
+                l.disk_offset = current_offset;
+                l.length = len;
+                l.in_multiline_comment = 0;
+                fwrite(&l, sizeof(Line), 1, index_file);
+            }
+            current_lines++;
+            current_offset = ftell_64(orig_file);
+        }
     }
-    if (current_lines == 0) insert_empty_line(0);
+    if (current_lines == 0) {
+        is_read_only = false;
+        insert_empty_line(0);
+    }
     strncpy(current_filename, filename, 4095);
     current_filename[4095] = '\0';
 }
 
 void save_file(void) {
+    if (is_read_only) return;
     FILE *file = fopen(current_filename, "w");
     if (file) {
         for (int i = 0; i < current_lines; i++) {
-            fprintf(file, "%s\n", text_buffer[i].text);
+            fprintf(file, "%s\n", get_line_text(i));
         }
         fclose(file);
     }
@@ -416,7 +670,7 @@ void fix_cursor(void) {
     if (cursor_r < 0) cursor_r = 0;
     if (cursor_r >= current_lines) cursor_r = current_lines - 1;
 
-    len = text_buffer[cursor_r].length;
+    len = get_line_info(cursor_r).length;
     if (mode == 0) {
         if (cursor_c >= len && len > 0) cursor_c = len - 1;
     } else {
@@ -490,22 +744,8 @@ void render_screen(void) {
         int line_idx = row_offset + i;
         if (line_idx < current_lines) {
             printf("%s", bright_colors[color_index]);
-            for (int j = 0; j < (int)text_buffer[line_idx].length; j++) {
-                int in_sel = 0;
-                if (sel_active) {
-                    int r1, c1, r2, c2;
-                    get_sel_bounds(&r1, &c1, &r2, &c2);
-                    if (line_idx > r1 && line_idx < r2) in_sel = 1;
-                    else if (line_idx == r1 && line_idx == r2 && j >= c1 && j < c2) in_sel = 1;
-                    else if (line_idx == r1 && line_idx < r2 && j >= c1) in_sel = 1;
-                    else if (line_idx == r2 && line_idx > r1 && j < c2) in_sel = 1;
-                }
-                if (in_sel) {
-                    printf("\x1b[47;30m%c%s", text_buffer[line_idx].text[j], bright_colors[color_index]);
-                } else {
-                    printf("%c", text_buffer[line_idx].text[j]);
-                }
-            }
+            int tmp_multi = get_line_info(line_idx).in_multiline_comment;
+            print_syntax_highlighted(get_line_text(line_idx), &tmp_multi, 0);
             printf("\x1b[K\r\n");
         } else {
             printf("\x1b[36m~%s\x1b[K\r\n", bright_colors[color_index]);
@@ -610,21 +850,21 @@ void handle_normal(int c) {
         case 'j': case KEY_DOWN:  cursor_r++; break;
         case 'k': case KEY_UP:    cursor_r--; break;
         case KEY_HOME: case '0':  cursor_c = 0; break;
-        case KEY_END:  case '$':  cursor_c = (int)text_buffer[cursor_r].length; break;
+        case KEY_END:  case '$':  cursor_c = (int)get_line_info(cursor_r).length; break;
         case KEY_PGUP: cursor_r -= (screen_rows - 2); break;
         case KEY_PGDN: cursor_r += (screen_rows - 2); break;
         case KEY_CTRL_HOME: cursor_r = 0; cursor_c = 0; break;
-        case KEY_CTRL_END: cursor_r = current_lines - 1; cursor_c = (int)text_buffer[cursor_r].length; break;
+        case KEY_CTRL_END: cursor_r = current_lines - 1; cursor_c = (int)get_line_info(cursor_r).length; break;
         
         case 'i': case KEY_INS: mode = 1; break;
         case 'a': cursor_c++; mode = 1; break;
         case 'I': cursor_c = 0; mode = 1; break;
-        case 'A': cursor_c = (int)text_buffer[cursor_r].length; mode = 1; break;
+        case 'A': cursor_c = (int)get_line_info(cursor_r).length; mode = 1; break;
         
         case 'x': case KEY_DEL:
-            if (text_buffer[cursor_r].text[cursor_c] != '\0') {
-                for (int i = cursor_c; text_buffer[cursor_r].text[i]; i++) {
-                    text_buffer[cursor_r].text[i] = text_buffer[cursor_r].text[i + 1];
+            if (get_line_text(cursor_r)[cursor_c] != '\0') {
+                for (int i = cursor_c; get_line_text(cursor_r)[i]; i++) {
+                    text_buffer[cursor_r].text[i] = get_line_text(cursor_r)[i + 1];
                 }
                 text_buffer[cursor_r].length--;
             }
@@ -660,22 +900,22 @@ void handle_insert(int c) {
     else if (c == KEY_LEFT) { cursor_c--; }
     else if (c == KEY_RIGHT) { cursor_c++; }
     else if (c == KEY_HOME) { cursor_c = 0; }
-    else if (c == KEY_END) { cursor_c = (int)text_buffer[cursor_r].length; }
+    else if (c == KEY_END) { cursor_c = (int)get_line_info(cursor_r).length; }
     else if (c == KEY_PGUP) { cursor_r -= (screen_rows - 2); }
     else if (c == KEY_PGDN) { cursor_r += (screen_rows - 2); }
     else if (c == KEY_CTRL_HOME) { cursor_r = 0; cursor_c = 0; }
-    else if (c == KEY_CTRL_END) { cursor_r = current_lines - 1; cursor_c = (int)text_buffer[cursor_r].length; }
+    else if (c == KEY_CTRL_END) { cursor_r = current_lines - 1; cursor_c = (int)get_line_info(cursor_r).length; }
     else if (c == KEY_DEL) {
-        if (text_buffer[cursor_r].text[cursor_c] != '\0') {
-            for (int i = cursor_c; text_buffer[cursor_r].text[i]; i++) {
-                text_buffer[cursor_r].text[i] = text_buffer[cursor_r].text[i + 1];
+        if (get_line_text(cursor_r)[cursor_c] != '\0') {
+            for (int i = cursor_c; get_line_text(cursor_r)[i]; i++) {
+                text_buffer[cursor_r].text[i] = get_line_text(cursor_r)[i + 1];
             }
             text_buffer[cursor_r].length--;
         } else if (cursor_r < current_lines - 1) {
-            int len = text_buffer[cursor_r].length;
-            int next_len = text_buffer[cursor_r + 1].length;
+            int len = get_line_info(cursor_r).length;
+            int next_len = get_line_info(cursor_r + 1).length;
             ensure_line_capacity(cursor_r, len + next_len + 1);
-            memmove(&text_buffer[cursor_r].text[len], text_buffer[cursor_r + 1].text, next_len + 1);
+            memmove(&text_buffer[cursor_r].text[len], get_line_text(cursor_r + 1), next_len + 1);
             text_buffer[cursor_r].length += next_len;
             free_line(cursor_r + 1);
             for (int i = cursor_r + 1; i < current_lines - 1; i++) {
@@ -685,9 +925,9 @@ void handle_insert(int c) {
         }
     } else if (c == 10 || c == 13) { /* Enter */
         insert_empty_line(cursor_r + 1);
-        int rem_len = text_buffer[cursor_r].length - cursor_c;
+        int rem_len = get_line_info(cursor_r).length - cursor_c;
         ensure_line_capacity(cursor_r + 1, rem_len + 1);
-        memmove(text_buffer[cursor_r + 1].text, &text_buffer[cursor_r].text[cursor_c], rem_len + 1);
+        memmove(text_buffer[cursor_r + 1].text, &get_line_text(cursor_r)[cursor_c], rem_len + 1);
         text_buffer[cursor_r + 1].length = rem_len;
         text_buffer[cursor_r].text[cursor_c] = '\0';
         text_buffer[cursor_r].length = cursor_c;
@@ -695,17 +935,17 @@ void handle_insert(int c) {
         cursor_c = 0;
     } else if (c == 8 || c == 127) { /* Backspace */
         if (cursor_c > 0) {
-            int len = text_buffer[cursor_r].length;
+            int len = get_line_info(cursor_r).length;
             for (int i = cursor_c; i <= len; i++) {
-                text_buffer[cursor_r].text[i - 1] = text_buffer[cursor_r].text[i];
+                text_buffer[cursor_r].text[i - 1] = get_line_text(cursor_r)[i];
             }
             text_buffer[cursor_r].length--;
             cursor_c--;
         } else if (cursor_r > 0) {
-            int prev_len = text_buffer[cursor_r - 1].length;
-            int cur_len = text_buffer[cursor_r].length;
+            int prev_len = get_line_info(cursor_r - 1).length;
+            int cur_len = get_line_info(cursor_r).length;
             ensure_line_capacity(cursor_r - 1, prev_len + cur_len + 1);
-            strcat(text_buffer[cursor_r - 1].text, text_buffer[cursor_r].text);
+            strcat(text_buffer[cursor_r - 1].text, get_line_text(cursor_r));
             text_buffer[cursor_r - 1].length += cur_len;
             free_line(cursor_r);
             for (int i = cursor_r; i < current_lines - 1; i++) {
@@ -716,10 +956,10 @@ void handle_insert(int c) {
             cursor_c = prev_len;
         }
     } else if (c >= 32 && c <= 126) { /* Standard ASCII Characters */
-        int len = text_buffer[cursor_r].length;
+        int len = get_line_info(cursor_r).length;
         ensure_line_capacity(cursor_r, len + 2);
         for (int i = len; i >= cursor_c; i--) {
-            text_buffer[cursor_r].text[i + 1] = text_buffer[cursor_r].text[i];
+            text_buffer[cursor_r].text[i + 1] = get_line_text(cursor_r)[i];
         }
         text_buffer[cursor_r].text[cursor_c] = (char)c;
         text_buffer[cursor_r].length++;
@@ -798,6 +1038,7 @@ void exit_editor(void) {
 }
 
 int main(int argc, char *argv[]) {
+    
     int c;
 
     if (argc > 1) {

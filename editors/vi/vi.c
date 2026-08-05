@@ -216,6 +216,7 @@ static void print_syntax_highlighted(const char *text, int *in_multiline_comment
 
         printf("%c", text[i++]);
     }
+    printf("\x1b[0m");
 }
 
 
@@ -1038,7 +1039,7 @@ void exit_editor(void) {
 }
 
 int main(int argc, char *argv[]) {
-    setvbuf(stdout, NULL, _IOFBF, 8192);
+    setvbuf(stdout, NULL, _IOFBF, 65536);
     
     int c;
 

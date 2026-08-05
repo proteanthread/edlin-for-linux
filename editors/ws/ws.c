@@ -196,6 +196,7 @@ static void print_syntax_highlighted(const char *text, int *in_multiline_comment
 
         ws_print("%c", text[i++]);
     }
+    ws_print("\x1b[0m");
 }
 
 
@@ -980,7 +981,7 @@ static void refresh_screen(void) {
 }
 
 int main(int argc, char **argv) {
-    setvbuf(stdout, NULL, _IOFBF, 8192);
+    setvbuf(stdout, NULL, _IOFBF, 65536);
     
     int c, len, visible_rows, rx;
     bool moved_vertically = false;

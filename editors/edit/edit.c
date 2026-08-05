@@ -236,6 +236,7 @@ static void print_syntax_highlighted(const char *text, int *in_multiline_comment
 
         edit_print("%c", text[i++]);
     }
+    edit_print("\x1b[0m");
 }
 
 
@@ -1310,7 +1311,7 @@ static void execute_menu_edit(void) {
 }
 
 int main(int argc, char **argv) {
-    setvbuf(stdout, NULL, _IOFBF, 8192);
+    setvbuf(stdout, NULL, _IOFBF, 262144);
     
     int c, rx, visible_rows, visible_cols, max_rows;
     bool moved_vertically = false;

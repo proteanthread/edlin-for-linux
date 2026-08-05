@@ -300,6 +300,7 @@ static void print_syntax_highlighted(const char *text, int *in_multiline_comment
 
         printf("%c", text[i++]);
     }
+    printf("\x1b[0m");
 }
 
 

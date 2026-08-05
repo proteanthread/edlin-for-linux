@@ -98,7 +98,7 @@ static Line get_line_info(int row) {
     Line l;
     memset(&l, 0, sizeof(Line));
     if (index_file) {
-        fseek_64(index_file, (int64_t)row * sizeof(Line), SEEK_SET);
+        fseek_64(index_file, (int64_t)row * (int64_t)sizeof(Line), SEEK_SET);
         fread(&l, sizeof(Line), 1, index_file);
     }
     return l;
@@ -114,7 +114,7 @@ static const char* get_line_text(int row) {
     fseek_64(orig_file, l.disk_offset, SEEK_SET);
     int to_read = l.length;
     if (to_read >= (int)sizeof(view_buf)) to_read = sizeof(view_buf) - 1;
-    if (to_read > 0) fread(view_buf, 1, to_read, orig_file);
+    if (to_read > 0) fread(view_buf, 1, (size_t)to_read, orig_file);
     view_buf[to_read] = '\0';
     return view_buf;
 }
@@ -125,11 +125,11 @@ static void ensure_line_in_memory(int row) {
     if (row < 0 || row >= edlin_line_count) return;
     if (!edlin_buffer[row].text) {
         edlin_buffer[row].capacity = get_line_info(row).length + 128;
-        edlin_buffer[row].text = malloc(edlin_buffer[row].capacity);
+        edlin_buffer[row].text = malloc((size_t)edlin_buffer[row].capacity);
         if (!edlin_buffer[row].text) { fprintf(stderr, "OOM\n"); exit(1); }
         if (get_line_info(row).length > 0 && orig_file) {
             fseek_64(orig_file, get_line_info(row).disk_offset, SEEK_SET);
-            fread(edlin_buffer[row].text, 1, get_line_info(row).length, orig_file);
+            fread(edlin_buffer[row].text, 1, (size_t)get_line_info(row).length, orig_file);
         }
         edlin_buffer[row].text[get_line_info(row).length] = '\0';
     }
@@ -144,13 +144,16 @@ static void oom(void) {
 static void ensure_line_capacity(int row, size_t needed) {
     ensure_line_in_memory(row);
     if (needed > (size_t)edlin_buffer[row].capacity) {
-        size_t new_cap = edlin_buffer[row].capacity * 2;
+        size_t new_cap = (size_t)edlin_buffer[row].capacity * 2;
         if (new_cap < needed) new_cap = needed;
         if (new_cap < 128) new_cap = 128;
         char *new_text = realloc(edlin_buffer[row].text, new_cap);
         if (!new_text) oom();
         edlin_buffer[row].text = new_text;
-        edlin_buffer[row].capacity = new_cap;
+        if (new_cap > (size_t)edlin_buffer[row].capacity) {
+            memset(&new_text[edlin_buffer[row].capacity], 0, new_cap - (size_t)edlin_buffer[row].capacity);
+        }
+        edlin_buffer[row].capacity = (int)new_cap;
     }
 }
 
@@ -159,8 +162,9 @@ static void ensure_buffer_capacity(int needed) {
         int new_cap = edlin_buffer_capacity * 2;
         if (new_cap < needed) new_cap = needed;
         if (new_cap < 256) new_cap = 256;
-        Line *new_buf = realloc(edlin_buffer, new_cap * sizeof(Line));
+        Line *new_buf = realloc(edlin_buffer, (size_t)new_cap * sizeof(Line));
         if (!new_buf) oom();
+        memset(&new_buf[edlin_buffer_capacity], 0, (size_t)(new_cap - edlin_buffer_capacity) * sizeof(Line));
         edlin_buffer = new_buf;
         edlin_buffer_capacity = new_cap;
     }
@@ -199,7 +203,7 @@ static int is_syntax_keyword(const char *word, int len) {
         "int", "char", "void", "float", "double", "bool", "static", "const", "struct", "class", "public", "private", "unsigned", "long", "short", "sizeof"
     };
     for (int i = 0; i < (int)(sizeof(keywords)/sizeof(keywords[0])); i++) {
-        if (len == (int)strlen(keywords[i]) && strncmp(word, keywords[i], len) == 0) return 1;
+        if (len == (int)strlen(keywords[i]) && strncmp(word, keywords[i], (size_t)len) == 0) return 1;
     }
     return 0;
 }
@@ -384,7 +388,7 @@ static void edlin_get_string_prompt(const char *prompt, char *buffer)
 static void display_edlin_help(void)
 {
     int page_size = get_edlin_page_size();
-    edlin_print("\nedlin - Built-in Line Editor\n");
+    edlin_print("\nedlin - Line Editor v4.1.0\n");
     edlin_print("Available Commands:\n");
     edlin_print("  [line] - Edit a specific line (enter line number)\n");
     edlin_print("  a      - Append lines from disk into memory\n");
@@ -442,7 +446,7 @@ static void load_edlin_file(const char *filename)
             insert_empty_line_at(edlin_line_count);
             ensure_line_capacity(edlin_line_count - 1, len + 1);
             strcpy(edlin_buffer[edlin_line_count - 1].text, line_buf);
-            edlin_buffer[edlin_line_count - 1].length = len;
+            edlin_buffer[edlin_line_count - 1].length = (int)len;
             edlin_buffer[edlin_line_count - 1].in_multiline_comment = in_comment;
             
             int i = 0;
@@ -481,11 +485,11 @@ static void load_edlin_file(const char *filename)
             while (len > 0 && (line_buf[len - 1] == '\n' || line_buf[len - 1] == '\r')) {
                 line_buf[len - 1] = '\0'; len--;
             }
-            if (!is_read_only && (edlin_line_count + 1) * sizeof(Line) > 256 * 1024 * 1024) {
+            if (!is_read_only && (size_t)(edlin_line_count + 1) * sizeof(Line) > 256 * 1024 * 1024) {
                 is_read_only = true;
                 index_file = tmpfile();
                 if (index_file && edlin_buffer) {
-                    fwrite(edlin_buffer, sizeof(Line), edlin_line_count, index_file);
+                    fwrite(edlin_buffer, sizeof(Line), (size_t)edlin_line_count, index_file);
                 }
                 if (edlin_buffer) { free(edlin_buffer); edlin_buffer = NULL; }
             }
@@ -494,13 +498,13 @@ static void load_edlin_file(const char *filename)
                 ensure_buffer_capacity(edlin_line_count + 1);
                 edlin_buffer[edlin_line_count].text = NULL;
                 edlin_buffer[edlin_line_count].disk_offset = current_offset;
-                edlin_buffer[edlin_line_count].length = len;
+                edlin_buffer[edlin_line_count].length = (int)len;
                 edlin_buffer[edlin_line_count].capacity = 0;
             } else if (index_file) {
                 Line l;
                 memset(&l, 0, sizeof(Line));
                 l.disk_offset = current_offset;
-                l.length = len;
+                l.length = (int)len;
                 fwrite(&l, sizeof(Line), 1, index_file);
             }
             edlin_line_count++;
@@ -561,7 +565,7 @@ static void insert_edlin_line(void)
         size_t len = strlen(input);
         ensure_line_capacity(edlin_line_count - 1, len + 1);
         strcpy(edlin_buffer[edlin_line_count - 1].text, input);
-        edlin_buffer[edlin_line_count - 1].length = len;
+        edlin_buffer[edlin_line_count - 1].length = (int)len;
     }
 }
 
@@ -579,6 +583,7 @@ static void delete_edlin_line(void)
             edlin_buffer[i] = edlin_buffer[i + 1];
         }
         edlin_line_count--;
+        memset(&edlin_buffer[edlin_line_count], 0, sizeof(Line));
         edlin_print("Line deleted.\n");
     } else {
         edlin_print("Error: Invalid line number.\n");
@@ -603,7 +608,7 @@ static void edit_edlin_line(int index)
                 size_t len = strlen(input);
                 ensure_line_capacity(index, len + 1);
                 strcpy(edlin_buffer[index].text, input);
-                edlin_buffer[index].length = len;
+                edlin_buffer[index].length = (int)len;
             }
         }
     } else {
@@ -637,12 +642,12 @@ static void copy_edlin_lines(void)
     int src_offset = (dest < start) ? count : 0;
     for (int j = 0; j < count; j++) {
         int src_idx = start + src_offset + j;
-        size_t len = get_line_info(src_idx).length;
+        size_t len = (size_t)get_line_info(src_idx).length;
         edlin_buffer[dest + j].text = malloc(len + 1);
         if (!edlin_buffer[dest + j].text) oom();
         strcpy(edlin_buffer[dest + j].text, get_line_text(src_idx));
-        edlin_buffer[dest + j].length = len;
-        edlin_buffer[dest + j].capacity = len + 1;
+        edlin_buffer[dest + j].length = (int)len;
+        edlin_buffer[dest + j].capacity = (int)(len + 1);
     }
     edlin_line_count += count;
     edlin_print("%d lines copied.\n", count);
@@ -763,7 +768,7 @@ static void replace_edlin_text(void)
             size_t temp_len = strlen(temp);
             ensure_line_capacity(i, temp_len + 1);
             strcpy(edlin_buffer[i].text, temp);
-            edlin_buffer[i].length = temp_len;
+            edlin_buffer[i].length = (int)temp_len;
             
             edlin_print("%d: ", i + 1);
             int mc = get_line_info(i).in_multiline_comment;
@@ -799,7 +804,7 @@ static void transfer_edlin_file(void)
         size_t len = strlen(input);
         ensure_line_capacity(dest, len + 1);
         strcpy(edlin_buffer[dest].text, input);
-        edlin_buffer[dest].length = len;
+        edlin_buffer[dest].length = (int)len;
         dest++;
     }
     fclose(f);
@@ -830,6 +835,7 @@ static void write_edlin_lines(void)
         edlin_buffer[i - count] = edlin_buffer[i];
     }
     edlin_line_count -= count;
+    memset(&edlin_buffer[edlin_line_count], 0, (size_t)count * sizeof(Line));
     edlin_print("%d lines written to disk and cleared from memory.\n", count);
 }
 
@@ -858,7 +864,7 @@ static void append_edlin_lines(void)
         size_t len = strlen(input);
         ensure_line_capacity(edlin_line_count - 1, len + 1);
         strcpy(edlin_buffer[edlin_line_count - 1].text, input);
-        edlin_buffer[edlin_line_count - 1].length = len;
+        edlin_buffer[edlin_line_count - 1].length = (int)len;
         appended++;
     }
     fclose(file);
@@ -944,7 +950,7 @@ int main(int argc, char **argv)
             move_edlin_lines();
             break;
         case 'o':
-            color_index = (color_index + 1) % NUM_BRIGHT_COLORS;
+            color_index = (int)((unsigned)(color_index + 1) % NUM_BRIGHT_COLORS);
             edlin_print("%s\x1b[2J\x1b[H[Color Changed]\r\n", bright_colors[color_index]);
             break;
         case 'p':
@@ -971,6 +977,16 @@ int main(int argc, char **argv)
     }
 
 edlin_exit:
+    /* Cleanup: free all buffer memory and close file handles */
+    if (edlin_buffer) {
+        for (int i = 0; i < edlin_line_count; i++) {
+            free(edlin_buffer[i].text);
+        }
+        free(edlin_buffer);
+        edlin_buffer = NULL;
+    }
+    if (orig_file) { fclose(orig_file); orig_file = NULL; }
+    if (index_file) { fclose(index_file); index_file = NULL; }
     edlin_print("\x1b[0m\x1b[2J\x1b[H");
     return 0;
 }

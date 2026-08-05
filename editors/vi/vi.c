@@ -16,7 +16,6 @@
 
 #include <stdio.h>
 #define _FILE_OFFSET_BITS 64
-#define _FILE_OFFSET_BITS 64
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -115,13 +114,13 @@ static int is_syntax_keyword(const char *word, int len) {
         "int", "char", "void", "float", "double", "bool", "static", "const", "struct", "class", "public", "private", "unsigned", "long", "short", "sizeof"
     };
     for (int i = 0; i < (int)(sizeof(keywords)/sizeof(keywords[0])); i++) {
-        if (len == (int)strlen(keywords[i]) && strncmp(word, keywords[i], len) == 0) return 1;
+        if (len == (int)strlen(keywords[i]) && strncmp(word, keywords[i], (size_t)len) == 0) return 1;
     }
     return 0;
 }
 
 /* Forward declarations for theme colors (defined later) */
-static const char *bright_colors[];
+static const char *bright_colors[6];
 static int color_index;
 
 static void print_syntax_highlighted(const char *text, int *in_multiline_comment, int is_selected) {
@@ -248,7 +247,7 @@ static Line get_line_info(int row) {
     Line l;
     memset(&l, 0, sizeof(Line));
     if (index_file) {
-        fseek_64(index_file, (int64_t)row * sizeof(Line), SEEK_SET);
+        fseek_64(index_file, (int64_t)row * (int64_t)sizeof(Line), SEEK_SET);
         fread(&l, sizeof(Line), 1, index_file);
     }
     return l;
@@ -264,7 +263,7 @@ static const char* get_line_text(int row) {
     fseek_64(orig_file, l.disk_offset, SEEK_SET);
     int to_read = l.length;
     if (to_read >= (int)sizeof(view_buf)) to_read = sizeof(view_buf) - 1;
-    if (to_read > 0) fread(view_buf, 1, to_read, orig_file);
+    if (to_read > 0) fread(view_buf, 1, (size_t)to_read, orig_file);
     view_buf[to_read] = '\0';
     return view_buf;
 }
@@ -275,11 +274,11 @@ static void ensure_line_in_memory(int row) {
     if (row < 0 || row >= current_lines) return;
     if (!get_line_text(row)) {
         text_buffer[row].capacity = get_line_info(row).length + 128;
-        text_buffer[row].text = malloc(text_buffer[row].capacity);
+        text_buffer[row].text = malloc((size_t)text_buffer[row].capacity);
         if (!get_line_text(row)) oom();
         if (get_line_info(row).length > 0 && orig_file) {
             fseek_64(orig_file, text_buffer[row].disk_offset, SEEK_SET);
-            fread(text_buffer[row].text, 1, get_line_info(row).length, orig_file);
+            fread(text_buffer[row].text, 1, (size_t)get_line_info(row).length, orig_file);
         }
         text_buffer[row].text[get_line_info(row).length] = '\0';
     }
@@ -288,13 +287,16 @@ static void ensure_line_in_memory(int row) {
 static void ensure_line_capacity(int row, size_t needed) {
     ensure_line_in_memory(row);
     if (needed > (size_t)text_buffer[row].capacity) {
-        size_t new_cap = text_buffer[row].capacity * 2;
+        size_t new_cap = (size_t)text_buffer[row].capacity * 2;
         if (new_cap < needed) new_cap = needed;
         if (new_cap < 128) new_cap = 128;
         char *new_text = realloc(text_buffer[row].text, new_cap);
         if (!new_text) oom();
         text_buffer[row].text = new_text;
-        text_buffer[row].capacity = new_cap;
+        if (new_cap > (size_t)text_buffer[row].capacity) {
+            memset(&new_text[text_buffer[row].capacity], 0, new_cap - (size_t)text_buffer[row].capacity);
+        }
+        text_buffer[row].capacity = (int)new_cap;
     }
 }
 
@@ -303,8 +305,9 @@ static void ensure_buffer_capacity(int needed) {
         int new_cap = text_buffer_capacity * 2;
         if (new_cap < needed) new_cap = needed;
         if (new_cap < 256) new_cap = 256;
-        Line *new_buf = realloc(text_buffer, new_cap * sizeof(Line));
+        Line *new_buf = realloc(text_buffer, (size_t)new_cap * sizeof(Line));
         if (!new_buf) oom();
+        memset(&new_buf[text_buffer_capacity], 0, (size_t)(new_cap - text_buffer_capacity) * sizeof(Line));
         text_buffer = new_buf;
         text_buffer_capacity = new_cap;
     }
@@ -401,7 +404,7 @@ void init_term(void) {
     tcgetattr(0, &orig_termios);
     atexit(reset_term);
     raw = orig_termios;
-    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | ISIG);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     tcsetattr(0, TCSANOW, &raw);
@@ -586,7 +589,7 @@ void load_file(const char *filename) {
                 len--;
             }
             insert_empty_line(current_lines);
-            ensure_line_capacity(current_lines - 1, len + 1);
+            ensure_line_capacity(current_lines - 1, (size_t)(len + 1));
             strcpy(text_buffer[current_lines - 1].text, line_buf);
             text_buffer[current_lines - 1].length = len;
             text_buffer[current_lines - 1].in_multiline_comment = in_multi;
@@ -624,11 +627,11 @@ void load_file(const char *filename) {
                 line_buf[len - 1] = '\0';
                 len--;
             }
-            if (!is_read_only && (current_lines + 1) * sizeof(Line) > 256 * 1024 * 1024) {
+            if (!is_read_only && (size_t)(current_lines + 1) * sizeof(Line) > 256 * 1024 * 1024) {
                 is_read_only = true;
                 index_file = tmpfile();
                 if (index_file && text_buffer) {
-                    fwrite(text_buffer, sizeof(Line), current_lines, index_file);
+                    fwrite(text_buffer, sizeof(Line), (size_t)current_lines, index_file);
                 }
                 if (text_buffer) { free(text_buffer); text_buffer = NULL; }
             }
@@ -802,7 +805,7 @@ void render_screen(void) {
 
 void display_help(void) {
     printf("\x1b[2J\x1b[H"); 
-    printf("--- vi Built-in Help ---\r\n\n");
+    printf("--- vi-like text editor (version 4.1.0) Built-in Help ---\r\n\n");
     printf(" NORMAL MODE:\r\n");
     printf("   h,j,k,l / Arrows : Move cursor\r\n");
     printf("   Home / End       : Jump to start/end of line\r\n");
@@ -843,6 +846,7 @@ void handle_normal(int c) {
                     text_buffer[i] = text_buffer[i + 1];
                 }
                 current_lines--;
+                memset(&text_buffer[current_lines], 0, sizeof(Line));
                 if (cursor_r >= current_lines) cursor_r = current_lines - 1;
             } else {
                 text_buffer[0].text[0] = '\0';
@@ -923,20 +927,21 @@ void handle_insert(int c) {
         } else if (cursor_r < current_lines - 1) {
             int len = get_line_info(cursor_r).length;
             int next_len = get_line_info(cursor_r + 1).length;
-            ensure_line_capacity(cursor_r, len + next_len + 1);
-            memmove(&text_buffer[cursor_r].text[len], get_line_text(cursor_r + 1), next_len + 1);
+            ensure_line_capacity(cursor_r, (size_t)(len + next_len + 1));
+            memmove(&text_buffer[cursor_r].text[len], get_line_text(cursor_r + 1), (size_t)(next_len + 1));
             text_buffer[cursor_r].length += next_len;
             free_line(cursor_r + 1);
             for (int i = cursor_r + 1; i < current_lines - 1; i++) {
                 text_buffer[i] = text_buffer[i + 1];
             }
             current_lines--;
+            memset(&text_buffer[current_lines], 0, sizeof(Line));
         }
     } else if (c == 10 || c == 13) { /* Enter */
         insert_empty_line(cursor_r + 1);
         int rem_len = get_line_info(cursor_r).length - cursor_c;
-        ensure_line_capacity(cursor_r + 1, rem_len + 1);
-        memmove(text_buffer[cursor_r + 1].text, &get_line_text(cursor_r)[cursor_c], rem_len + 1);
+        ensure_line_capacity(cursor_r + 1, (size_t)(rem_len + 1));
+        memmove(text_buffer[cursor_r + 1].text, &get_line_text(cursor_r)[cursor_c], (size_t)(rem_len + 1));
         text_buffer[cursor_r + 1].length = rem_len;
         text_buffer[cursor_r].text[cursor_c] = '\0';
         text_buffer[cursor_r].length = cursor_c;
@@ -953,7 +958,7 @@ void handle_insert(int c) {
         } else if (cursor_r > 0) {
             int prev_len = get_line_info(cursor_r - 1).length;
             int cur_len = get_line_info(cursor_r).length;
-            ensure_line_capacity(cursor_r - 1, prev_len + cur_len + 1);
+            ensure_line_capacity(cursor_r - 1, (size_t)(prev_len + cur_len + 1));
             strcat(text_buffer[cursor_r - 1].text, get_line_text(cursor_r));
             text_buffer[cursor_r - 1].length += cur_len;
             free_line(cursor_r);
@@ -961,12 +966,13 @@ void handle_insert(int c) {
                 text_buffer[i] = text_buffer[i + 1];
             }
             current_lines--;
+            memset(&text_buffer[current_lines], 0, sizeof(Line));
             cursor_r--;
             cursor_c = prev_len;
         }
     } else if (c >= 32 && c <= 126) { /* Standard ASCII Characters */
         int len = get_line_info(cursor_r).length;
-        ensure_line_capacity(cursor_r, len + 2);
+        ensure_line_capacity(cursor_r, (size_t)(len + 2));
         for (int i = len; i >= cursor_c; i--) {
             text_buffer[cursor_r].text[i + 1] = get_line_text(cursor_r)[i];
         }
@@ -1016,7 +1022,7 @@ void handle_command(int c) {
             load_file(current_filename);
         }
         else if (strcmp(cmd_buffer, "color") == 0) {
-            color_index = (color_index + 1) % NUM_BRIGHT_COLORS;
+            color_index = (int)((unsigned)(color_index + 1) % NUM_BRIGHT_COLORS);
         }
         else if (strncmp(cmd_buffer, "color ", 6) == 0) {
             char new_color[4096];
@@ -1074,6 +1080,16 @@ int main(int argc, char *argv[]) {
         else if (mode == 2) handle_command(c);
     }
     
+    /* Cleanup: free all buffer memory and close file handles */
+    if (text_buffer) {
+        for (int i = 0; i < current_lines; i++) {
+            free(text_buffer[i].text);
+        }
+        free(text_buffer);
+        text_buffer = NULL;
+    }
+    if (orig_file) { fclose(orig_file); orig_file = NULL; }
+    if (index_file) { fclose(index_file); index_file = NULL; }
     exit_editor();
     return 0;
 }

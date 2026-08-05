@@ -120,13 +120,17 @@ static int is_syntax_keyword(const char *word, int len) {
     return 0;
 }
 
+/* Forward declarations for theme colors (defined later) */
+static const char *bright_colors[];
+static int color_index;
+
 static void print_syntax_highlighted(const char *text, int *in_multiline_comment, int is_selected) {
     if (!text) return;
     int len = (int)strlen(text);
     int i = 0;
     
-    // Base color for normal text
-    const char *base_color = is_selected ? "\x1b[7m" : "\x1b[0m";
+    // Base color for normal text - use the editor's theme color
+    const char *base_color = is_selected ? "\x1b[7m" : bright_colors[color_index];
     const char *kw_color = "\x1b[96m"; // Cyan for keywords
     const char *str_color = "\x1b[93m"; // Yellow for strings
     const char *num_color = "\x1b[95m"; // Magenta for numbers
@@ -216,7 +220,7 @@ static void print_syntax_highlighted(const char *text, int *in_multiline_comment
 
         printf("%c", text[i++]);
     }
-    printf("\x1b[0m");
+    printf("%s", bright_colors[color_index]);
 }
 
 

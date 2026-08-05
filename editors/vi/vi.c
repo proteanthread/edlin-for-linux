@@ -826,7 +826,9 @@ void display_help(void) {
 
     printf("Press any key to return...");
     fflush(stdout);
-    get_input(); /* Block execution until user returns */
+    /* Loop until we get a real keypress, not a timeout */
+    int k;
+    do { k = get_input(); } while (k == KEY_TIMEOUT || k == 0);
 }
 
 void handle_normal(int c) {

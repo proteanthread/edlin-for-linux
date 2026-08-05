@@ -926,6 +926,10 @@ static void refresh_screen(void) {
         y_start = 4;
     }
     
+    /* Track multiline comment state sequentially across visible lines */
+    int first_visible = row_off;
+    int mc = (first_visible < num_lines) ? get_line_info(first_visible).in_multiline_comment : 0;
+    
     for (y = y_start; y < screen_rows - 1; y++) {
         file_row = row_off + (y - y_start);
         if (file_row < num_lines) {
@@ -942,10 +946,30 @@ static void refresh_screen(void) {
                 }
                 char tmp = r_buf[col_off + print_len];
                 r_buf[col_off + print_len] = '\0';
-                int mc = get_line_info(file_row).in_multiline_comment;
                 print_syntax_highlighted(&r_buf[col_off], &mc, in_sel);
                 r_buf[col_off + print_len] = tmp;
                 ws_print("%s", bright_colors[color_index]);
+            } else {
+                /* Line is empty/short but still need to update mc state */
+                const char *full_text = get_line_text(file_row);
+                int full_len = (int)strlen(full_text);
+                for (int k = 0; k < full_len; k++) {
+                    if (mc) {
+                        if (full_text[k] == '*' && k + 1 < full_len && full_text[k+1] == '/') { mc = 0; k++; }
+                    } else {
+                        if (full_text[k] == '/' && k + 1 < full_len && full_text[k+1] == '*') { mc = 1; k++; }
+                        else if (full_text[k] == '/' && k + 1 < full_len && full_text[k+1] == '/') break;
+                        else if (full_text[k] == '"' || full_text[k] == '\'') {
+                            char q = full_text[k++];
+                            while (k < full_len) {
+                                if (full_text[k] == '\\' && k + 1 < full_len) k += 2;
+                                else if (full_text[k] == q) { k++; break; }
+                                else k++;
+                            }
+                            k--; /* outer loop will k++ */
+                        }
+                    }
+                }
             }
         }
         ws_print("\x1b[K\r\n"); 

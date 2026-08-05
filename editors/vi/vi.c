@@ -745,12 +745,14 @@ void render_screen(void) {
     
     printf("%s", bright_colors[color_index]);
     
+    /* Track multiline comment state sequentially across visible lines */
+    int mc_state = (row_offset < current_lines) ? get_line_info(row_offset).in_multiline_comment : 0;
+    
     for (int i = 0; i < screen_rows - 1; i++) {
         int line_idx = row_offset + i;
         if (line_idx < current_lines) {
             printf("%s", bright_colors[color_index]);
-            int tmp_multi = get_line_info(line_idx).in_multiline_comment;
-            print_syntax_highlighted(get_line_text(line_idx), &tmp_multi, 0);
+            print_syntax_highlighted(get_line_text(line_idx), &mc_state, 0);
             printf("\x1b[K\r\n");
         } else {
             printf("\x1b[36m~%s\x1b[K\r\n", bright_colors[color_index]);

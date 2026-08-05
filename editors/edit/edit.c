@@ -972,6 +972,9 @@ static void draw_all(void) {
     edit_print("\x1b[1;%dH%s", screen_cols - time_len - 1, time_str);
     
     /* 3. Editor Content Area */
+    /* Track multiline comment state sequentially across visible lines */
+    int mc_state = (row_off < num_lines) ? get_line_info(row_off).in_multiline_comment : 0;
+    
     for (y = 2; y <= screen_rows - 1; y++) {
         file_row = row_off + (y - 2);
         edit_print("\x1b[%d;1H%s", y, bright_colors[color_index]); 
@@ -995,14 +998,13 @@ static void draw_all(void) {
                 int p_len = len - col_off;
                 if (p_len > draw_cols) r_buf[col_off + draw_cols] = '\0';
                 
-                int in_comm = get_line_info(file_row).in_multiline_comment;
                 int is_selected = 0;
                 if (sel_active) {
                     int r1, c1, r2, c2;
                     get_sel_bounds(&r1, &c1, &r2, &c2);
                     if (file_row >= r1 && file_row <= r2) is_selected = 1;
                 }
-                print_syntax_highlighted(r_buf + col_off, &in_comm, is_selected);
+                print_syntax_highlighted(r_buf + col_off, &mc_state, is_selected);
                 edit_print("\x1b[K");
             } else {
                 edit_print("\x1b[K");
